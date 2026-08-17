@@ -1,0 +1,6 @@
+# Optional: enables the local FinBERT sentiment engine (free, offline, no API key).
+# Heavy (~a few hundred MB incl. PyTorch + the model on first run), so it's opt-in.
+#   pip install -r requirements-finbert.txt
+# With this installed and no Claude key set, news falls back to FinBERT instead of keywords.
+transformers>=4.40
+torch>=2.2

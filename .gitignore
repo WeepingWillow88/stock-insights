@@ -1,0 +1,13 @@
+# data & caches — keep ONLY the slim seed snapshot
+data/*
+!data/seed.db
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.DS_Store
+
+# never commit local sqlite / big caches (seed.db re-included below)
+*.db
+!data/seed.db
