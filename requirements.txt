@@ -5,4 +5,5 @@ streamlit>=1.30
 lxml>=4.9
 beautifulsoup4>=4.12
 html5lib>=1.1
+requests>=2.31
 anthropic>=0.69
