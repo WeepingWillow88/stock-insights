@@ -171,8 +171,10 @@ def refresh_macro_news(cfg=CONFIG):
     ledger.record_recommendations(sig, cfg, run_date)
     ledger.update_open_positions(prices, cfg)
     _write_meta(cfg, "refresh (macro + news)", prices)
-    return {"regime": reg["label"], "news_source": news_df["source"].mode().iloc[0]
-            if not news_df.empty else "none", "run_date": run_date}
+    _srcmode = news_df["source"].mode() if not news_df.empty else pd.Series([], dtype=object)
+    return {"regime": reg["label"],
+            "news_source": _srcmode.iloc[0] if not _srcmode.empty else "none",
+            "run_date": run_date}
 
 
 if __name__ == "__main__":

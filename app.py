@@ -93,7 +93,7 @@ any column's ℹ️ for a plain-English definition.
   scheduled events that move everything (inflation/Fed/jobs), and a per-stock **news read**
   you can expand to see the actual headlines. Has a **🔄 Refresh** button.
 - **📈 Track record** — proof, not promises: a **live scorecard** of the app's own past calls,
-  and a **backtest** of the rules over ~3 years. Also holds the **circuit-breaker** warning.
+  and a **backtest** of the rules over ~10 years. Also holds the **circuit-breaker** warning.
 - **📊 Screener** — the raw ranked candidate list plus a price chart for any name.
 - **🧠 How it works** — the full method in plain English, and the settings you can ask to change.
 
@@ -444,7 +444,8 @@ with tab_news:
     if news_df.empty:
         st.info("No news scored yet — hit Refresh or run the pipeline.")
     else:
-        src = news_df["source"].mode().iloc[0] if "source" in news_df.columns else "?"
+        _srcmode = news_df["source"].mode() if "source" in news_df.columns else pd.Series([], dtype=object)
+        src = _srcmode.iloc[0] if not _srcmode.empty else "?"
         st.caption(f"Each stock's recent headlines, scored for a short-term trader "
                    f"(sentiment engine: **{src}**). Expand a stock to read the headlines yourself.")
         only = st.radio("Show", ["All", "Only negative", "Only positive"],
@@ -553,13 +554,19 @@ with tab_track:
     st.markdown(f"### 🧪 Backtest — how the rules did over ~{CONFIG.backtest_years}")
     st.caption("Uses the **upgraded rules**: trailing-stop + trend-break exits (gap-aware fills), "
                "and entries filtered for conviction, volume, relative strength and a rising market.")
+    on_cloud = bool(os.environ.get("DYNO"))  # Heroku sets DYNO on every dyno
     bcols = st.columns([3, 1])
     with bcols[1]:
-        if st.button("▶️ Run backtest", use_container_width=True,
-                     help=f"Replays the rules over ~{CONFIG.backtest_years}. First run "
-                          "downloads history (several minutes)."):
+        if on_cloud:
+            st.button("▶️ Run backtest", use_container_width=True, disabled=True,
+                      help="Disabled on the hosted app — it downloads years of data and would "
+                           "overload the dyno. Run it locally (python -m src.backtest); results "
+                           "ship in the app's data snapshot.")
+        elif st.button("▶️ Run backtest", use_container_width=True,
+                       help=f"Replays the rules over ~{CONFIG.backtest_years}. First run "
+                            "downloads history (several minutes)."):
             from src import backtest
-            with st.spinner("Running the backtest over ~3 years of history…"):
+            with st.spinner(f"Running the backtest over ~{CONFIG.backtest_years} of history…"):
                 try:
                     backtest.run_backtest(CONFIG)
                     load_table.clear()
@@ -570,8 +577,12 @@ with tab_track:
 
     if bt_summary_df.empty or int(bt_summary_df.iloc[0].get("trades", 0) or 0) == 0:
         with bcols[0]:
-            st.info("No backtest yet — click **Run backtest**. The first run downloads ~3 years "
-                    "of prices, so give it a few minutes.")
+            if on_cloud:
+                st.info("Backtesting runs locally, not on the hosted app (it's too heavy for the "
+                        "dyno). Run `python -m src.backtest` and the results ship in the snapshot.")
+            else:
+                st.info(f"No backtest yet — click **Run backtest**. The first run downloads "
+                        f"~{CONFIG.backtest_years} of prices, so give it a few minutes.")
     else:
         s = bt_summary_df.iloc[0]
         _gp, _ga, _ = freshness(s.get("generated"))

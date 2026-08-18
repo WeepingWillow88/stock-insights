@@ -30,7 +30,8 @@ def _rsi(s, n=14):
     d = s.diff()
     up = d.clip(lower=0).ewm(alpha=1 / n, min_periods=n).mean()
     dn = (-d.clip(upper=0)).ewm(alpha=1 / n, min_periods=n).mean()
-    return 100 - 100 / (1 + up / dn.replace(0, np.nan))
+    rsi = 100 - 100 / (1 + up / dn.replace(0, np.nan))
+    return rsi.mask((dn == 0) & (up > 0), 100.0)  # no down-days -> RSI 100, not NaN
 
 
 def _atr(high, low, close, n=14):
@@ -85,13 +86,17 @@ def _prep(prices, cfg):
         if not (beta >= cfg.min_beta and dvol >= cfg.min_avg_dollar_volume and s.iloc[-1] >= cfg.min_price):
             continue
         a = adj[t]
+        # Use split/dividend-adjusted OHLC consistently for signals, fills AND ATR
+        # (mixing adjusted indicators with raw fills biased the results).
+        factor = (a / close[t]).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+        hi_adj, lo_adj, op_adj = high[t] * factor, low[t] * factor, openp[t] * factor
         prep.append({
             "ticker": t,
-            "a": a.values, "c": close[t].values, "hi": high[t].values, "lo": low[t].values,
-            "open": openp[t].values,
+            "a": a.values, "c": a.values, "hi": hi_adj.values, "lo": lo_adj.values,
+            "open": op_adj.values,
             "sma20": a.rolling(cfg.backtest_trend_exit_sma).mean().values,
             "sma50": a.rolling(50).mean().values, "sma200": a.rolling(200).mean().values,
-            "rsi": _rsi(a).values, "atr": _atr(high[t], low[t], close[t]).values,
+            "rsi": _rsi(a).values, "atr": _atr(hi_adj, lo_adj, a).values,
             "vol": vol[t].values, "vol20": vol[t].rolling(20).mean().values,
             "mom3": (a / a.shift(63) - 1).values, "mom1": (a / a.shift(21) - 1).values,
         })
