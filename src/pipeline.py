@@ -107,8 +107,18 @@ def run_pipeline(cfg=CONFIG):
     body = notify.build_digest(run_kind, sig, reg_row, macro_events, fx_rate, cfg)
     notify.send_or_save(f"[{run_kind}] High-beta signals {run_date}", body, cfg)
 
+    _write_meta(cfg, f"full pipeline ({run_kind})", prices)
     print(f"      shortlist: {len(shortlist)} names, signals: {len(sig)} (run {run_date}).")
     return shortlist
+
+
+def _write_meta(cfg, run_kind, prices):
+    """Record when data was last pulled + the latest market bar it covers."""
+    db.write_df(pd.DataFrame([{
+        "last_updated": dt.datetime.now().isoformat(timespec="seconds"),
+        "run_kind": run_kind,
+        "market_through": prices["date"].max() if not prices.empty else None,
+    }]), "meta", cfg.db_path, if_exists="replace")
 
 
 def refresh_macro_news(cfg=CONFIG):
@@ -160,6 +170,7 @@ def refresh_macro_news(cfg=CONFIG):
     db.write_df(news_df, "news", cfg.db_path, if_exists="replace")
     ledger.record_recommendations(sig, cfg, run_date)
     ledger.update_open_positions(prices, cfg)
+    _write_meta(cfg, "refresh (macro + news)", prices)
     return {"regime": reg["label"], "news_source": news_df["source"].mode().iloc[0]
             if not news_df.empty else "none", "run_date": run_date}
 

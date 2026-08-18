@@ -17,6 +17,8 @@ technicals only (no historical news), and modelled fills. Past performance ≠ f
 
 Run:  python -m src.backtest
 """
+import datetime as dt
+
 import numpy as np
 import pandas as pd
 
@@ -232,6 +234,7 @@ def run_backtest(cfg=CONFIG, reuse_cache=True):
     tdf = _simulate(prep, spy_up, spy_mom3, dates, cfg)
     summary = _summarise(tdf, cfg)
     summary.update(_montecarlo(tdf, cfg))
+    summary["generated"] = dt.datetime.now().isoformat(timespec="seconds")
 
     if not tdf.empty:
         tdf = tdf.sort_values("entry_date")

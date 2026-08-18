@@ -3,6 +3,7 @@
 Run with:  streamlit run app.py
 (Populate data first with:  python -m src.pipeline)
 """
+import datetime as dt
 import os
 import shutil
 import sqlite3
@@ -50,6 +51,26 @@ def load_table(table):
 
 
 SIG_EMOJI = {"BUY": "🟢 BUY", "SELL": "🔴 SELL", "HOLD": "🟡 HOLD"}
+
+
+def freshness(iso):
+    """Return (pretty datetime, 'x ago', is_stale) for an ISO timestamp string."""
+    if not iso or pd.isna(iso):
+        return (None, None, False)
+    try:
+        t = dt.datetime.fromisoformat(str(iso))
+    except Exception:  # noqa: BLE001 - a plain date string (no time) still formats below
+        return (str(iso), None, False)
+    secs = (dt.datetime.now() - t).total_seconds()
+    if secs < 3600:
+        ago = f"{max(int(secs // 60), 0)} min ago"
+    elif secs < 86400:
+        ago = f"{int(secs // 3600)} h ago"
+    else:
+        d = int(secs // 86400)
+        ago = f"{d} day{'s' if d != 1 else ''} ago"
+    pretty = t.strftime("%a %d %b %Y, %H:%M") if t.hour or t.minute else t.strftime("%a %d %b %Y")
+    return (pretty, ago, secs > 36 * 3600)  # stale after ~1.5 days
 
 st.title("📈 High-Beta Stock Insights")
 st.caption("Decision-support only. Not financial advice. You place every trade yourself.")
@@ -103,7 +124,9 @@ any column's ℹ️ for a plain-English definition.
 ### Good to know
 - **News engine:** uses Claude AI when a key is set, otherwise **FinBERT** (a finance-trained
   model), otherwise a simple keyword scan — the active one is labelled on the Macro & News tab.
-- **Staying fresh:** hit 🔄 Refresh, or run the app's update before the open and after the close.
+- **How fresh is this?** A **🕒 Last updated** stamp sits at the top (and in the sidebar) showing
+  when data was last pulled and how long ago — it turns amber if the data looks stale. Each tab
+  also shows its own "as of" time. Hit 🔄 Refresh, or run the update before the open / after the close.
 
 > ⚠️ High beta moves fast **both ways**. This is decision-support and research — **not financial
 > advice**, and no tool guarantees profit. Your stops, sizing and diversification are what protect you.
@@ -119,6 +142,7 @@ ledger_df = load_table("ledger")
 bt_summary_df = load_table("backtest_summary")
 bt_trades_df = load_table("backtest_trades")
 bt_sens_df = load_table("backtest_sensitivity")
+meta_df = load_table("meta")
 
 if shortlist.empty:
     st.warning("No data yet. Run the pipeline first:  `python -m src.pipeline`")
@@ -126,6 +150,24 @@ if shortlist.empty:
 
 run_date = shortlist["run_date"].iloc[0] if "run_date" in shortlist.columns else "?"
 fx_rate = float(signals_df["fx_rate"].iloc[0]) if (not signals_df.empty and "fx_rate" in signals_df.columns) else CONFIG.fx_fallback
+
+# ---- Freshness: when was the data last pulled, and how old is it? ----
+_last_updated = meta_df.iloc[0].get("last_updated") if not meta_df.empty else run_date
+_market_through = meta_df.iloc[0].get("market_through") if not meta_df.empty else None
+_run_kind = meta_df.iloc[0].get("run_kind") if not meta_df.empty else None
+upd_pretty, upd_ago, upd_stale = freshness(_last_updated)
+
+_bits = [f"🕒 **Last updated:** {upd_pretty}" + (f" ({upd_ago})" if upd_ago else "")]
+if _market_through and not pd.isna(_market_through):
+    _bits.append(f"**market data through** {_market_through}")
+if _run_kind and not pd.isna(_run_kind):
+    _bits.append(f"via {_run_kind}")
+_fresh_line = "  ·  ".join(_bits)
+if upd_stale:
+    st.warning(_fresh_line + "  —  this looks **stale**; open the 📰 Macro & News tab and hit 🔄 Refresh "
+               "(or re-run the pipeline) for current numbers.")
+else:
+    st.success(_fresh_line)
 
 # ---- Sidebar ----
 with st.sidebar:
@@ -152,7 +194,10 @@ with st.sidebar:
     st.write(f"Total-risk ceiling: **{CONFIG.max_portfolio_heat * 100:.0f}%** of your money")
     st.caption("('Heat' = everything at risk across all open trades combined.)")
     st.write(f"£→$ rate used: **{fx_rate:.4f}**")
-    st.caption(f"Data last updated: {run_date}")
+    st.markdown("---")
+    st.caption(f"🕒 Data last pulled: **{upd_pretty}**" + (f" ({upd_ago})" if upd_ago else ""))
+    if _market_through and not pd.isna(_market_through):
+        st.caption(f"Covers prices through **{_market_through}**")
 
 tab_sig, tab_news, tab_track, tab_screen, tab_how = st.tabs(
     ["🎯 Signals & sizing", "📰 Macro & News", "📈 Track record",
@@ -184,7 +229,17 @@ with tab_sig:
                     "RISK-OFF": "new BUYs paused"}.get(label, "")
             banner = st.success if label == "RISK-ON" else st.warning if label == "CAUTION" else st.error
             banner(f"{headline}   →   {gate}")
-            with st.expander("Why this regime + upcoming macro events"):
+            st.caption(
+                "**What this means.** The *market regime* is the overall weather for risky stocks "
+                "right now — the app checks it before trusting any BUY, because high-beta names "
+                "live or die by the broad market. **🟢 RISK-ON** = market rising and calm, so these "
+                "stocks tend to do well (trades at full size). **🟡 CAUTION** = mixed signals, so it "
+                "trades smaller. **🔴 RISK-OFF** = market weak or fearful, when high beta falls "
+                "hardest, so new buys are paused.  \nThe three readings: **VIX** = the market's fear "
+                "level (under 20 = calm, over 30 = fearful); **S&P vs 50-day** = is the market itself "
+                "trending up (positive) or down; **US 10-year yield** rising fast is a headwind for "
+                "these stocks.")
+            with st.expander("See the full reasoning + upcoming market-moving events"):
                 for note in str(r.get("notes", "")).split(" • "):
                     if note:
                         st.markdown(f"- {note}")
@@ -202,6 +257,8 @@ with tab_sig:
         deployed_pct = total_pos_usd / capital_usd * 100 if capital_usd else 0
 
         st.subheader("Today's suggested portfolio")
+        st.caption(f"🕒 Based on data from **{upd_pretty}**" + (f" ({upd_ago})" if upd_ago else "")
+                   + " — re-check prices before you trade.")
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("BUY signals", int((sig["signal"] == "BUY").sum()))
         c2.metric("Positions taken", f"{int(selected.shape[0])} / {CONFIG.max_positions}")
@@ -246,8 +303,8 @@ with tab_sig:
         if selected.empty:
             st.info("No BUY signals qualify for the portfolio right now.")
         else:
-            pcols = ["rank", "ticker", "sector", "conviction", "beta", "rsi", "entry", "stop",
-                     "target", "shares", "pos_value_usd", "risk_gbp", "binding", "flags", "reason"]
+            pcols = ["rank", "ticker", "sector", "conviction", "beta", "entry", "stop",
+                     "target", "shares", "pos_value_usd", "risk_gbp", "flags", "reason"]
             pcols = [c for c in pcols if c in selected.columns]
             st.dataframe(selected[pcols], width="stretch", hide_index=True, column_config=money_cfg)
 
@@ -257,7 +314,7 @@ with tab_sig:
                                default=["BUY", "HOLD", "SELL"])
         view = sig[sig["signal"].isin(types)].copy()
         view["signal"] = view["signal"].map(SIG_EMOJI).fillna(view["signal"])
-        acols = ["rank", "ticker", "signal", "conviction", "beta", "rsi", "price", "stop",
+        acols = ["rank", "ticker", "signal", "conviction", "beta", "price", "stop",
                  "target", "shares", "pos_value_usd", "risk_gbp", "news", "flags", "reason"]
         acols = [c for c in acols if c in view.columns]
         st.dataframe(view[acols], width="stretch", hide_index=True, column_config=money_cfg)
@@ -321,7 +378,9 @@ with tab_news:
     top = st.columns([3, 1])
     with top[0]:
         st.subheader("Today's market picture, in plain English")
-        st.caption(f"Last refreshed: {run_date}")
+        st.caption(f"🕒 Last refreshed: **{upd_pretty}**" + (f" ({upd_ago})" if upd_ago else "")
+                   + (f"  ·  prices through {_market_through}" if _market_through
+                      and not pd.isna(_market_through) else ""))
     with top[1]:
         if st.button("🔄 Refresh now", use_container_width=True,
                      help="Re-pull the market regime, macro events, earnings and news. "
@@ -515,6 +574,10 @@ with tab_track:
                     "of prices, so give it a few minutes.")
     else:
         s = bt_summary_df.iloc[0]
+        _gp, _ga, _ = freshness(s.get("generated"))
+        if _gp:
+            st.caption(f"🕒 Backtest generated **{_gp}**" + (f" ({_ga})" if _ga else "")
+                       + f"  ·  {s.get('years', '?')} of history")
         c = st.columns(5)
         c[0].metric("Trades", int(s["trades"]))
         c[1].metric("Win rate", f"{s['win_rate']}%")
