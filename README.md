@@ -73,6 +73,29 @@ immediately (the app copies it into place on first run).
   `data/seed.db` locally and re-push to update the baseline (`python -m src.pipeline`, then the
   seed step in the repo).
 
+## Deploy to Heroku (~$5/mo, no free tier)
+
+Ships with a `Procfile` and `.python-version`. FinBERT is off here too (PyTorch is too big
+for a Heroku slug) — news uses Claude (if a key is set) or the keyword scorer.
+
+```bash
+cd stock-insights
+heroku login
+heroku create <your-app-name>              # or omit for a random name
+heroku config:set APP_PASSWORD=pick-a-password        # optional: gate the public URL
+heroku config:set ANTHROPIC_API_KEY=sk-ant-...        # optional: Claude news sentiment
+git push heroku main                        # builds & deploys
+heroku open
+```
+
+Heroku config vars are read straight from the environment (no `.env` needed). The app copies
+`data/seed.db` into place on first boot, so it opens with data. Dyno storage is ephemeral, so
+refreshes reset on restart/redeploy — update the shared baseline by re-running the pipeline,
+rebuilding the seed (`python make_seed.py`), and pushing again.
+
+> Alternatively, deploy from the Heroku Dashboard: *New → Create app → Deploy → GitHub*, connect
+> `WeepingWillow88/stock-insights`, and enable automatic deploys from `main`.
+
 ## Roadmap
 - **Phase 2** — buy/sell/hold signal engine + position sizing (uses your risk settings) + GBP→USD conversion
 - **Phase 3** — Claude news/sentiment layer, BOD/EOD email digests, hourly news-shock alerts
