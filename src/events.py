@@ -26,13 +26,6 @@ MACRO_EVENTS = [
 ]
 
 
-def calendar_exhausted(today=None):
-    """True once today is past the last seeded macro event — the calendar is stale and needs
-    topping up (otherwise the event-risk layer silently flags nothing forever)."""
-    today = today or dt.date.today()
-    return today > dt.date.fromisoformat(MACRO_EVENTS[-1][0])
-
-
 def upcoming_macro_events(today=None, within_days=10):
     today = today or dt.date.today()
     out = []

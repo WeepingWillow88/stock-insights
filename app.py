@@ -437,11 +437,12 @@ with tab_news:
     # ---- Upcoming events ----
     st.markdown("### 📅 Scheduled events that move the whole market")
     if events_df.empty or "label" not in events_df.columns or events_df["label"].isna().all():
-        from src import events as _events
-        if _events.calendar_exhausted():
+        from src.events import MACRO_EVENTS
+        _last_seeded = MACRO_EVENTS[-1][0]
+        if dt.date.today() > dt.date.fromisoformat(_last_seeded):
             st.warning("⚠️ The built-in macro-event calendar has run out (seeded through "
-                       f"**{_events.MACRO_EVENTS[-1][0]}**), so event-risk sizing is paused until "
-                       "it's topped up in `src/events.py`.")
+                       f"**{_last_seeded}**), so event-risk sizing is paused until it's topped "
+                       "up in `src/events.py`.")
         else:
             st.caption("No major CPI / Fed / jobs events in the next few days.")
     else:
