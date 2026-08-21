@@ -107,38 +107,21 @@ with st.expander("📖 How to read this dashboard", expanded=False):
     st.markdown(
         """
 ### What this app does
-It scans the liquid US market (S&P 500), finds **high-beta** stocks (ones that swing more
-than the market) that are **trending up**, turns them into **buy / hold / sell** calls with
-exact **position sizing**, checks the **market backdrop and the news**, and keeps a
-**track record** of how the calls turn out. Everything technical runs under the hood — hover
-any column's ℹ️ for a plain-English definition.
+It scans the S&P 500 for **high-beta** stocks (ones that swing more than the market) that are
+**trending up**, turns them into **buy / hold / sell** calls with exact **position sizing**,
+checks the **market backdrop and news**, and keeps a **track record**. Hover any column's ℹ️ for
+a plain-English definition; the **🧠 How it works** tab explains the full method, the buy/sell
+rules, the sizing maths, and how the daily refresh works.
 
 ### The five tabs
-- **🎯 Signals & sizing** — today's picks: what to buy, how many shares, the safety-exit
-  (stop) and profit target, £ at risk, and a **Confidence %**. The "take these" table is your
-  ready-to-trade shortlist (diversified across sectors).
-- **📰 Macro & News** — the market mood (are conditions good for high-beta right now?),
-  scheduled events that move everything (inflation/Fed/jobs), and a per-stock **news read**
-  you can expand to see the actual headlines. Has two refresh buttons: **🔄 Refresh macro &
-  news** (quick — regime/news on today's cached prices) and **⬇️ Pull fresh prices**
-  (re-downloads price history and advances the market-data date).
-- **📈 Track record** — proof, not promises: a **live scorecard** of the app's own past calls,
-  and a **backtest** of the rules over ~10 years. Also holds the **circuit-breaker** warning.
+- **🎯 Signals & sizing** — today's picks: what to buy, how many shares, the safety-exit and
+  profit target, £ at risk, and a **Confidence %**.
+- **📰 Macro & News** — the market mood, scheduled market-moving events, and per-stock news you
+  can expand. The two refresh buttons live here.
+- **📈 Track record** — a **live scorecard** of the app's own past calls, plus a **backtest** and
+  the **circuit-breaker** warning.
 - **📊 Screener** — the raw ranked candidate list plus a price chart for any name.
-- **🧠 How it works** — the full method in plain English, and the settings you can ask to change.
-
-### How the buy/hold/sell call is decided
-- **🟢 BUY** — uptrend (price above its 50-day average, 50-day above 200-day) + positive
-  momentum + healthy RSI, **and** the market backdrop allows it and the news isn't strongly negative.
-- **🟡 HOLD** — uptrend but overbought (wait for a dip), momentum cooling, earnings within a
-  few days, or fresh bad news — reasons to wait.
-- **🔴 SELL** — price dropped below its 50-day average (trend broken) or it's weak.
-
-### How much to buy (your rules)
-- **Risk per trade = 1.5% of £50,000 ≈ £750** — the most you'd *lose* if the safety-exit is hit
-  (not how much you put in). **Safety-exit = 2 average daily swings below entry**; **target =
-  twice that distance** (a 2:1 reward-to-risk trade). Shares are set so the loss can't exceed
-  your limit, and the portfolio takes at most **3 picks per sector** so it's genuinely diversified.
+- **🧠 How it works** — the full method, the freshness/refresh explainer, and the settings.
 
 ### Key terms you'll see
 | Term | Plain meaning |
@@ -150,17 +133,6 @@ any column's ℹ️ for a plain-English definition.
 | **News mood** | 🔴/⚪/🟢 read of recent headlines (engine shown on the Macro & News tab) |
 | **R (risk multiple)** | Track-record unit: +1R = made what you risked, −1R = hit your stop |
 | **Regime** | Whether market conditions favour high-beta (RISK-ON) or not (RISK-OFF) |
-
-### Good to know
-- **News engine:** uses Claude AI when a key is set, otherwise **FinBERT** (a finance-trained
-  model), otherwise a simple keyword scan — the active one is labelled on the Macro & News tab.
-- **How fresh is this?** A **🕒 Last updated** stamp sits at the top (and in the sidebar) showing
-  when data was last pulled and how long ago — it turns amber if the data looks stale. Each tab
-  also shows its own "as of" time. There are **two** freshness levers on the Macro & News tab:
-  **🔄 Refresh macro & news** re-reads the regime/events/news on the *cached* prices (quick), while
-  **⬇️ Pull fresh prices** re-downloads the full price history and advances the **market-data
-  through** date. The hosted app also auto-refreshes on a daily schedule (before the open / after
-  the close), so most of the time you don't need to press anything.
 
 > ⚠️ High beta moves fast **both ways**. This is decision-support and research — **not financial
 > advice**, and no tool guarantees profit. Your stops, sizing and diversification are what protect you.
@@ -246,59 +218,11 @@ with tab_sig:
         sig["selected"] = sig["selected"].astype(bool)
         selected = sig[sig["selected"]]
 
-        # ---- Layer A: market-regime banner ----
-        if not regime_df.empty:
-            r = regime_df.iloc[0]
-            label = str(r["label"])
-            bits = []
-            if pd.notna(r.get("vix")):
-                bits.append(f"VIX {r['vix']:.0f}")
-            if pd.notna(r.get("spy_vs_50d")):
-                bits.append(f"S&P vs 50-day {r['spy_vs_50d']:+.1f}%")
-            if pd.notna(r.get("us10y")):
-                bits.append(f"US 10Y {r['us10y']:.2f}%")
-            headline = f"Market regime: **{label}**   ·   " + "   ·   ".join(bits)
-            gate = {"RISK-ON": "new BUYs at full size",
-                    "CAUTION": "new BUYs allowed at reduced size",
-                    "RISK-OFF": "new BUYs paused"}.get(label, "")
-            banner = st.success if label == "RISK-ON" else st.warning if label == "CAUTION" else st.error
-            banner(f"{headline}   →   {gate}")
-            st.caption(
-                "**What this means.** The *market regime* is the overall weather for risky stocks "
-                "right now — the app checks it before trusting any BUY, because high-beta names "
-                "live or die by the broad market. **🟢 RISK-ON** = market rising and calm, so these "
-                "stocks tend to do well (trades at full size). **🟡 CAUTION** = mixed signals, so it "
-                "trades smaller. **🔴 RISK-OFF** = market weak or fearful, when high beta falls "
-                "hardest, so new buys are paused.  \nThe three readings: **VIX** = the market's fear "
-                "level (under 20 = calm, over 30 = fearful); **S&P vs 50-day** = is the market itself "
-                "trending up (positive) or down; **US 10-year yield** rising fast is a headwind for "
-                "these stocks.")
-            with st.expander("See the full reasoning + upcoming market-moving events"):
-                for note in str(r.get("notes", "")).split(" • "):
-                    if note:
-                        st.markdown(f"- {note}")
-                if not events_df.empty and "label" in events_df.columns:
-                    st.markdown("**Upcoming scheduled events** (seeded calendar — verify dates):")
-                    st.dataframe(events_df[["date", "label", "days_until"]],
-                                 width="stretch", hide_index=True)
-                else:
-                    st.caption("No major scheduled macro events in the window.")
-
         capital_usd = CONFIG.capital_gbp * fx_rate
         total_pos_usd = float(selected["pos_value_usd"].sum())
         total_risk_gbp = float(selected["risk_gbp"].sum())
         heat_pct = total_risk_gbp / CONFIG.capital_gbp * 100 if CONFIG.capital_gbp else 0
         deployed_pct = total_pos_usd / capital_usd * 100 if capital_usd else 0
-
-        st.subheader("Today's suggested portfolio")
-        st.caption(f"🕒 Based on data from **{upd_pretty}**" + (f" ({upd_ago})" if upd_ago else "")
-                   + " — re-check prices before you trade.")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("BUY signals", int((sig["signal"] == "BUY").sum()))
-        c2.metric("Positions taken", f"{int(selected.shape[0])} / {CONFIG.max_positions}")
-        c3.metric("Capital deployed", f"${total_pos_usd:,.0f}", f"{deployed_pct:.0f}% of capital")
-        c4.metric("Portfolio heat", f"£{total_risk_gbp:,.0f}", f"{heat_pct:.1f}% (cap {CONFIG.max_portfolio_heat*100:.0f}%)")
-        c5.metric("Cash free", f"${max(capital_usd - total_pos_usd, 0):,.0f}")
 
         money_cfg = {
             "price": st.column_config.NumberColumn("Price", format="$%.2f",
@@ -331,8 +255,16 @@ with tab_sig:
             "sector": st.column_config.TextColumn("Sector",
                      help="Industry group. The portfolio caps how many picks come from one "
                           "sector so your positions aren't secretly one big bet."),
+            "flags": st.column_config.TextColumn("Flags",
+                     help="Extra context: upcoming earnings, a market-moving event soon, "
+                          "or a notable news read."),
+            "reason": st.column_config.TextColumn("Why", width="large",
+                     help="Plain-English reason behind this call."),
         }
 
+        # ---- Lead with the actionable buy list ----
+        st.subheader("Today's suggested portfolio")
+        st.caption("Re-check the live price before you place any trade.")
         st.markdown("**✅ Take these (top BUY signals within your 8-position limit):**")
         if selected.empty:
             st.info("No BUY signals qualify for the portfolio right now.")
@@ -341,6 +273,23 @@ with tab_sig:
                      "target", "shares", "pos_value_usd", "risk_gbp", "flags", "reason"]
             pcols = [c for c in pcols if c in selected.columns]
             st.dataframe(selected[pcols], width="stretch", hide_index=True, column_config=money_cfg)
+
+        # ---- Portfolio summary ----
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("BUY signals", int((sig["signal"] == "BUY").sum()))
+        c2.metric("Positions taken", f"{int(selected.shape[0])} / {CONFIG.max_positions}")
+        c3.metric("Capital deployed", f"${total_pos_usd:,.0f}", f"{deployed_pct:.0f}% of capital")
+        c4.metric("Portfolio heat", f"£{total_risk_gbp:,.0f}", f"{heat_pct:.1f}% (cap {CONFIG.max_portfolio_heat*100:.0f}%)")
+        c5.metric("Cash free", f"${max(capital_usd - total_pos_usd, 0):,.0f}")
+
+        # ---- One-line market-regime badge (full detail on 📰 Macro & News) ----
+        if not regime_df.empty:
+            _rl = str(regime_df.iloc[0]["label"])
+            _gate = {"RISK-ON": "new BUYs at full size",
+                     "CAUTION": "new BUYs at reduced size — be selective",
+                     "RISK-OFF": "new BUYs paused"}.get(_rl, "")
+            (st.success if _rl == "RISK-ON" else st.warning if _rl == "CAUTION" else st.error)(
+                f"Market regime: **{_rl}** → {_gate}.  Full picture on the **📰 Macro & News** tab.")
 
         st.markdown("---")
         st.subheader("All signals")
@@ -412,9 +361,6 @@ with tab_news:
     top = st.columns([2, 1, 1])
     with top[0]:
         st.subheader("Today's market picture, in plain English")
-        st.caption(f"🕒 Last refreshed: **{upd_pretty}**" + (f" ({upd_ago})" if upd_ago else "")
-                   + (f"  ·  prices through {_market_through}" if _market_through
-                      and not pd.isna(_market_through) else ""))
     with top[1]:
         if st.button("🔄 Refresh macro & news", use_container_width=True,
                      help="Re-pull the market regime, macro events, earnings and news and rebuild "
@@ -474,12 +420,14 @@ with tab_news:
         }.get(label, "")
         (st.success if label == "RISK-ON" else st.warning if label == "CAUTION" else st.error)(
             f"**{label}** — {plain}")
+        def _fmt(v, suffix="", dp=1):
+            return f"{float(v):.{dp}f}{suffix}" if pd.notna(v) else "—"
         m = st.columns(3)
-        m[0].metric("VIX (fear gauge)", f"{r.get('vix')}",
+        m[0].metric("VIX (fear gauge)", _fmt(r.get('vix'), dp=1),
                     help="Under 20 = calm, 20–30 = jittery, over 30 = fearful.")
-        m[1].metric("S&P 500 vs its 50-day avg", f"{r.get('spy_vs_50d')}%",
+        m[1].metric("S&P 500 vs its 50-day avg", _fmt(r.get('spy_vs_50d'), '%', 1),
                     help="Positive = market in an uptrend.")
-        m[2].metric("US 10-year yield", f"{r.get('us10y')}%",
+        m[2].metric("US 10-year yield", _fmt(r.get('us10y'), '%', 2),
                     help="Rising fast tends to pressure high-beta / growth stocks.")
         with st.expander("What went into this call?"):
             for note in str(r.get("notes", "")).split(" • "):
@@ -489,7 +437,13 @@ with tab_news:
     # ---- Upcoming events ----
     st.markdown("### 📅 Scheduled events that move the whole market")
     if events_df.empty or "label" not in events_df.columns or events_df["label"].isna().all():
-        st.caption("No major CPI / Fed / jobs events in the next few days.")
+        from src import events as _events
+        if _events.calendar_exhausted():
+            st.warning("⚠️ The built-in macro-event calendar has run out (seeded through "
+                       f"**{_events.MACRO_EVENTS[-1][0]}**), so event-risk sizing is paused until "
+                       "it's topped up in `src/events.py`.")
+        else:
+            st.caption("No major CPI / Fed / jobs events in the next few days.")
     else:
         st.caption("These are volatility days — the app sizes down around them. "
                    "(Seeded calendar; verify exact dates against BLS / the Fed.)")
@@ -611,13 +565,15 @@ with tab_track:
     st.markdown(f"### 🧪 Backtest — how the rules did over ~{CONFIG.backtest_years}")
     st.caption("Uses the **upgraded rules**: trailing-stop + trend-break exits (gap-aware fills), "
                "and entries filtered for conviction, volume, relative strength and a rising market.")
-    on_cloud = bool(os.environ.get("DYNO"))  # Heroku sets DYNO on every dyno
+    # Detect a hosted deployment: Streamlit Community Cloud checks the repo out under /mount/src;
+    # (legacy Heroku set DYNO). The heavy multi-year backtest download is disabled there.
+    on_cloud = os.path.isdir("/mount/src") or bool(os.environ.get("DYNO"))
     bcols = st.columns([3, 1])
     with bcols[1]:
         if on_cloud:
             st.button("▶️ Run backtest", use_container_width=True, disabled=True,
                       help="Disabled on the hosted app — it downloads years of data and would "
-                           "overload the dyno. Run it locally (python -m src.backtest); results "
+                           "overload the server. Run it locally (python -m src.backtest); results "
                            "ship in the app's data snapshot.")
         elif st.button("▶️ Run backtest", use_container_width=True,
                        help=f"Replays the rules over ~{CONFIG.backtest_years}. First run "
@@ -636,7 +592,7 @@ with tab_track:
         with bcols[0]:
             if on_cloud:
                 st.info("Backtesting runs locally, not on the hosted app (it's too heavy for the "
-                        "dyno). Run `python -m src.backtest` and the results ship in the snapshot.")
+                        "server). Run `python -m src.backtest` and the results ship in the snapshot.")
             else:
                 st.info(f"No backtest yet — click **Run backtest**. The first run downloads "
                         f"~{CONFIG.backtest_years} of prices, so give it a few minutes.")
@@ -703,11 +659,13 @@ with tab_track:
         if not bt_trades_df.empty and "equity" in bt_trades_df.columns:
             eq = bt_trades_df.sort_values("entry_date")[["entry_date", "equity"]].copy()
             eq["entry_date"] = pd.to_datetime(eq["entry_date"])
-            st.line_chart(eq.set_index("entry_date")["equity"], height=220)
-            st.caption("⚠️ **Illustrative shape only** — this compounds every trade one-after-another "
-                       "as if taken alone, so the *height* is unrealistic; read it for the trend and "
-                       "the size of the dips, not as an account balance. The trustworthy numbers are "
-                       "the win rate, average edge (R) and profit factor above.")
+            eq = eq.set_index("entry_date")
+            eq["drawdown_%"] = (eq["equity"] / eq["equity"].cummax() - 1.0) * 100
+            st.markdown("**Drawdown over the backtest** — how far below its own peak the strategy sat")
+            st.area_chart(eq["drawdown_%"], height=220)
+            st.caption("This is the honest picture of the ride: each dip is a losing stretch, in % of "
+                       "the (compounding) account. The headline numbers to trust are the win rate, "
+                       "average edge (R) and profit factor above.")
         # Robustness (6): Monte-Carlo range + parameter sensitivity
         if s.get("mc_exp_p50") is not None:
             st.markdown("#### 🎲 How robust is this? (not just one lucky run)")
@@ -804,7 +762,6 @@ Your rules drive the maths:
   2. `(£{c.capital_gbp:,.0f} ÷ {c.max_positions} positions) ÷ entry price` (equal-weight capital slot).
 
   Taking the smaller means you **never risk more than £{risk_gbp:,.0f}** *and* **never overspend one slot**.
-  The **"binding"** column tells you which of the two capped the size.
 
 #### Step 7 — Build the portfolio
 Take the **top {c.max_positions} BUY signals** by rank (your max positions). Because each risks
@@ -902,34 +859,23 @@ moves are close to random; the discipline (stops, sizing, diversification) is wh
     )
 
     st.subheader("Dials you can ask to change")
+    st.caption("The settings you're most likely to touch — the full set lives in `src/config.py`.")
     params = pd.DataFrame([
-        {"Setting": "min_beta", "Now": c.min_beta, "What it does": "Minimum beta to make the shortlist (higher = only the wildest movers)"},
-        {"Setting": "shortlist_size", "Now": c.shortlist_size, "What it does": "How many names the shortlist holds"},
-        {"Setting": "min_price", "Now": c.min_price, "What it does": "Cheapest share price allowed"},
-        {"Setting": "min_avg_dollar_volume", "Now": c.min_avg_dollar_volume, "What it does": "Minimum daily liquidity ($)"},
-        {"Setting": "beta_window", "Now": c.beta_window, "What it does": "Trading days used to measure beta"},
-        {"Setting": "rsi_overbought", "Now": c.rsi_overbought, "What it does": "RSI above this = HOLD (too hot to buy)"},
-        {"Setting": "rsi_min_buy", "Now": c.rsi_min_buy, "What it does": "RSI below this = HOLD (momentum too weak)"},
-        {"Setting": "atr_stop_mult", "Now": c.atr_stop_mult, "What it does": "Stop width = this × ATR (bigger = wider stop, fewer shares)"},
-        {"Setting": "reward_risk", "Now": c.reward_risk, "What it does": "Target size as a multiple of the stop distance"},
-        {"Setting": "risk_per_trade", "Now": c.risk_per_trade, "What it does": "Fraction of capital risked per trade"},
-        {"Setting": "max_positions", "Now": c.max_positions, "What it does": "Most positions held at once"},
-        {"Setting": "capital_gbp", "Now": c.capital_gbp, "What it does": "Total trading capital (£)"},
-        {"Setting": "earnings_block_days", "Now": c.earnings_block_days, "What it does": "Downgrade BUY→HOLD if earnings within this many days"},
-        {"Setting": "macro_event_sizedown_days", "Now": c.macro_event_sizedown_days, "What it does": "Size down if a CPI/FOMC/jobs event is this close"},
-        {"Setting": "claude_model", "Now": c.claude_model, "What it does": "Model for news sentiment (Haiku = cheap; claude-opus-5 = max quality)"},
-        {"Setting": "use_claude_news", "Now": c.use_claude_news, "What it does": "Use Claude for news; falls back to keywords if unavailable"},
-        {"Setting": "shock_move_pct", "Now": c.shock_move_pct, "What it does": "Intraday % move that triggers the hourly news-shock alert"},
-        {"Setting": "max_per_sector", "Now": c.max_per_sector, "What it does": "Max portfolio positions from one sector (diversification cap)"},
-        {"Setting": "beta_shrink", "Now": c.beta_shrink, "What it does": "How much to trust raw beta vs nudge it toward the market (robustness)"},
-        {"Setting": "daily_loss_limit_pct", "Now": c.daily_loss_limit_pct, "What it does": "Circuit-breaker: warn if today's realized losses exceed this % of capital"},
-        {"Setting": "backtest_max_hold_days", "Now": c.backtest_max_hold_days, "What it does": "Time-based exit: close a trade after this many days"},
+        {"Setting": "Minimum jumpiness (beta)", "Now": str(c.min_beta),
+         "What it does": "Only show stocks at least this jumpy vs the market"},
+        {"Setting": "Risk per trade", "Now": f"{c.risk_per_trade*100:.1f}%",
+         "What it does": f"Most you'd lose on one trade (~£{c.capital_gbp*c.risk_per_trade:,.0f})"},
+        {"Setting": "Stop width", "Now": f"{c.atr_stop_mult:.0f}x ATR",
+         "What it does": "How far the safety-exit sits below the buy price"},
+        {"Setting": "Reward : risk", "Now": f"{c.reward_risk:.0f}:1",
+         "What it does": "Profit target set this many times the risk taken"},
+        {"Setting": "Max positions", "Now": str(c.max_positions),
+         "What it does": "Most trades held at once"},
+        {"Setting": "Trading capital", "Now": f"£{c.capital_gbp:,.0f}",
+         "What it does": "Total money the position sizing is based on"},
     ])
-    # 'Now' mixes numbers, booleans and the model string — render as text so Arrow
-    # doesn't try (and fail) to coerce the whole column to a number.
-    params["Now"] = params["Now"].astype(str)
     st.dataframe(params, width="stretch", hide_index=True)
     st.caption("Want a change? Just tell me e.g. \"only show beta ≥ 2\", \"use a 3×ATR stop\", "
                "or \"risk 1% per trade\" — I'll update `src/config.py` and re-run.")
-    st.info("These are **rules-based** signals from price data. Phase 3 adds a Claude news/"
-            "sentiment layer that can nudge a BUY to HOLD when the headlines say caution.")
+    st.info("These are **rules-based** signals from price data, with a news/sentiment layer that "
+            "can nudge a BUY to HOLD when the headlines say caution.")

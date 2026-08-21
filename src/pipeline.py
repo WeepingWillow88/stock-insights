@@ -76,32 +76,12 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
     print(f"      GBP/USD={fx_rate:.4f}; {n_buy} BUY signals, "
           f"{int(sig['selected'].sum()) if not sig.empty else 0} selected.")
 
-    # Flatten regime + events for storage
-    reg_row = {"label": reg["label"], "score": reg["score"],
-               "size_multiplier": reg["size_multiplier"],
-               "vix": reg["readings"]["vix"], "spy_vs_50d": reg["readings"]["spy_vs_50d"],
-               "us10y": reg["readings"]["us10y"],
-               "notes": " • ".join(reg["notes"]), "run_date": run_date}
-    events_df = pd.DataFrame(macro_events) if macro_events else pd.DataFrame(
-        columns=["date", "label", "days_until"])
-    events_df["run_date"] = run_date
-
-    news_df = pd.DataFrame([
-        {"ticker": t, "label": v.get("label"), "sentiment": v.get("sentiment"),
-         "materiality": v.get("materiality"), "macro_driver": v.get("macro_driver"),
-         "action_bias": v.get("action_bias"), "source": v.get("source"),
-         "rationale": v.get("rationale"), "headlines": " || ".join(v.get("headlines", [])),
-         "run_date": run_date}
-        for t, v in news_map.items()
-    ])
+    reg_row, events_df, news_df = _macro_news_frames(reg, macro_events, news_map, run_date)
 
     print("[6/6] Saving results...")
     db.write_df(m, "metrics", cfg.db_path, if_exists="replace")
     db.write_df(shortlist, "screen_results", cfg.db_path, if_exists="replace")
-    db.write_df(sig, "signals", cfg.db_path, if_exists="replace")
-    db.write_df(pd.DataFrame([reg_row]), "regime", cfg.db_path, if_exists="replace")
-    db.write_df(events_df, "macro_events", cfg.db_path, if_exists="replace")
-    db.write_df(news_df, "news", cfg.db_path, if_exists="replace")
+    _persist_signals_bundle(sig, reg_row, events_df, news_df, cfg)
 
     opened = ledger.record_recommendations(sig, cfg, run_date)
     closed = ledger.update_open_positions(prices, cfg)
@@ -124,6 +104,36 @@ def _write_meta(cfg, run_kind, prices):
         "run_kind": run_kind,
         "market_through": prices["date"].max() if not prices.empty else None,
     }]), "meta", cfg.db_path, if_exists="replace")
+
+
+def _macro_news_frames(reg, macro_events, news_map, run_date):
+    """Flatten regime + events + news into DataFrames for storage.
+    Shared by the full pipeline and the lighter macro/news refresh."""
+    reg_row = {"label": reg["label"], "score": reg["score"],
+               "size_multiplier": reg["size_multiplier"],
+               "vix": reg["readings"]["vix"], "spy_vs_50d": reg["readings"]["spy_vs_50d"],
+               "us10y": reg["readings"]["us10y"],
+               "notes": " • ".join(reg["notes"]), "run_date": run_date}
+    events_df = pd.DataFrame(macro_events) if macro_events else pd.DataFrame(
+        columns=["date", "label", "days_until"])
+    events_df["run_date"] = run_date
+    news_df = pd.DataFrame([
+        {"ticker": t, "label": v.get("label"), "sentiment": v.get("sentiment"),
+         "materiality": v.get("materiality"), "macro_driver": v.get("macro_driver"),
+         "action_bias": v.get("action_bias"), "source": v.get("source"),
+         "rationale": v.get("rationale"), "headlines": " || ".join(v.get("headlines", [])),
+         "run_date": run_date}
+        for t, v in news_map.items()
+    ])
+    return reg_row, events_df, news_df
+
+
+def _persist_signals_bundle(sig, reg_row, events_df, news_df, cfg):
+    """Write the signals + regime + events + news tables (the outputs both refresh paths share)."""
+    db.write_df(sig, "signals", cfg.db_path, if_exists="replace")
+    db.write_df(pd.DataFrame([reg_row]), "regime", cfg.db_path, if_exists="replace")
+    db.write_df(events_df, "macro_events", cfg.db_path, if_exists="replace")
+    db.write_df(news_df, "news", cfg.db_path, if_exists="replace")
 
 
 def refresh_macro_news(cfg=CONFIG):
@@ -152,27 +162,8 @@ def refresh_macro_news(cfg=CONFIG):
     sig["run_date"] = run_date
     sig["fx_rate"] = fx_rate
 
-    reg_row = {"label": reg["label"], "score": reg["score"],
-               "size_multiplier": reg["size_multiplier"],
-               "vix": reg["readings"]["vix"], "spy_vs_50d": reg["readings"]["spy_vs_50d"],
-               "us10y": reg["readings"]["us10y"],
-               "notes": " • ".join(reg["notes"]), "run_date": run_date}
-    events_df = pd.DataFrame(macro_events) if macro_events else pd.DataFrame(
-        columns=["date", "label", "days_until"])
-    events_df["run_date"] = run_date
-    news_df = pd.DataFrame([
-        {"ticker": t, "label": v.get("label"), "sentiment": v.get("sentiment"),
-         "materiality": v.get("materiality"), "macro_driver": v.get("macro_driver"),
-         "action_bias": v.get("action_bias"), "source": v.get("source"),
-         "rationale": v.get("rationale"), "headlines": " || ".join(v.get("headlines", [])),
-         "run_date": run_date}
-        for t, v in news_map.items()
-    ])
-
-    db.write_df(sig, "signals", cfg.db_path, if_exists="replace")
-    db.write_df(pd.DataFrame([reg_row]), "regime", cfg.db_path, if_exists="replace")
-    db.write_df(events_df, "macro_events", cfg.db_path, if_exists="replace")
-    db.write_df(news_df, "news", cfg.db_path, if_exists="replace")
+    reg_row, events_df, news_df = _macro_news_frames(reg, macro_events, news_map, run_date)
+    _persist_signals_bundle(sig, reg_row, events_df, news_df, cfg)
     ledger.record_recommendations(sig, cfg, run_date)
     ledger.update_open_positions(prices, cfg)
     _write_meta(cfg, "refresh (macro + news)", prices)

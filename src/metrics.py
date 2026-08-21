@@ -57,8 +57,6 @@ def compute_metrics(prices, benchmark="SPY", beta_window=252, beta_shrink=0.67, 
             "mom_1m": _r(mom_1m, 4),
             "atr_pct": _r(atr_pct, 4),
             "avg_dollar_vol": avg_dollar_vol,
-            "above_sma50": bool(price > sma50) if pd.notna(sma50) else False,
-            "sma50_gt_sma200": bool(sma50 > sma200) if pd.notna(sma200) else False,
             "uptrend": uptrend,
         })
     return pd.DataFrame(rows)

@@ -46,6 +46,10 @@ def _indicators(p, cfg):
     adj = p["adj_close"].astype(float)
     if len(adj) < 60:
         return None
+    # Trend/RSI/momentum are judged on the split/dividend-adjusted series (`price`), so the
+    # comparison to the SMAs is like-for-like. `entry` stays the raw last close — the actual
+    # tradeable price you'd place an order at (and what the ATR-based stop/target hang off).
+    price = float(adj.iloc[-1])
     entry = float(p["close"].astype(float).iloc[-1])
     sma20 = float(adj.tail(20).mean())
     sma50 = float(adj.tail(50).mean())
@@ -56,13 +60,13 @@ def _indicators(p, cfg):
     mom_1m = float(adj.iloc[-1] / adj.iloc[-21] - 1) if len(adj) >= 21 else np.nan
     atr = _atr_abs(p["high"].astype(float), p["low"].astype(float), p["close"].astype(float))
     return {
-        "entry": entry, "sma20": sma20, "sma50": sma50, "sma200": sma200,
+        "price": price, "entry": entry, "sma20": sma20, "sma50": sma50, "sma200": sma200,
         "rsi": rsi, "mom_3m": mom_3m, "mom_1m": mom_1m, "atr": atr,
     }
 
 
 def generate_signal(ind, cfg):
-    price, sma50, sma200 = ind["entry"], ind["sma50"], ind["sma200"]
+    price, sma50, sma200 = ind["price"], ind["sma50"], ind["sma200"]
     rsi, mom_3m, mom_1m = ind["rsi"], ind["mom_3m"], ind["mom_1m"]
     uptrend = price > sma50 and (np.isnan(sma200) or sma50 > sma200)
     pos_mom = (mom_3m or 0) > 0 or (mom_1m or 0) > 0
@@ -110,7 +114,7 @@ def size_position(entry, atr, cfg, fx_rate):
 
 def _conviction(ind, nws, cfg):
     """0–100% agreement across independent checks — a plain 'how sure are we'."""
-    price, sma50, sma200 = ind["entry"], ind["sma50"], ind["sma200"]
+    price, sma50, sma200 = ind["price"], ind["sma50"], ind["sma200"]
     rsi, mom_3m, mom_1m = ind["rsi"], ind["mom_3m"], ind["mom_1m"]
     checks = [
         price > sma50 and (np.isnan(sma200) or sma50 > sma200),   # trend
@@ -237,13 +241,19 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
     df["selected"] = False
     sector_count = {}
     chosen = 0
+    heat_gbp = 0.0
+    heat_cap_gbp = cfg.max_portfolio_heat * cfg.capital_gbp  # total £-at-risk ceiling
     for i, r in df[df["signal"] == "BUY"].sort_values("rank").iterrows():
         if chosen >= cfg.max_positions:
             break
         sec = r.get("sector", "Unknown")
         if sector_count.get(sec, 0) >= cfg.max_per_sector:
             continue  # sector full — skip to keep the portfolio diversified
+        r_gbp = float(r.get("risk_gbp") or 0)
+        if heat_cap_gbp and heat_gbp + r_gbp > heat_cap_gbp:
+            continue  # would breach the portfolio-heat ceiling — skip (a smaller pick may still fit)
         df.loc[i, "selected"] = True
         sector_count[sec] = sector_count.get(sec, 0) + 1
+        heat_gbp += r_gbp
         chosen += 1
     return df
