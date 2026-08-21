@@ -1,0 +1,62 @@
+name: Refresh market data
+
+# Runs the full pipeline (re-downloads prices, recomputes metrics/screen/signals/macro/news),
+# rebuilds the slim seed.db that ships to Streamlit Cloud, and pushes it. Pushing seed.db to the
+# repo triggers a Streamlit Community Cloud redeploy, so the live app picks up fresh prices with
+# no manual step.
+#
+# Schedule is in UTC. US market is 09:30–16:00 ET (UTC-4 in summer / UTC-5 in winter), so these
+# fire roughly "before the open" and "after the close" during EDT; they drift ~1h in EST.
+on:
+  schedule:
+    - cron: "45 12 * * 1-5"   # ~08:45 ET — before the US open (weekdays)
+    - cron: "15 20 * * 1-5"   # ~16:15 ET — after the US close (weekdays)
+  workflow_dispatch:           # allow manual "Run workflow" from the Actions tab
+
+# Never let two refreshes run at once (they both push seed.db).
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+permissions:
+  contents: write              # needed to commit + push the refreshed seed.db
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full pipeline (download prices + rebuild everything)
+        env:
+          # Optional: set this repo secret to score news with Claude; without it the pipeline
+          # falls back to a keyword scan (FinBERT is not installed in CI to keep the run light).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RUN_KIND: SCHEDULED
+        run: python -m src.pipeline
+
+      - name: Rebuild slim seed.db
+        run: python make_seed.py
+
+      - name: Commit & push refreshed seed.db
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/seed.db
+          if git diff --cached --quiet; then
+            echo "No change in seed.db — nothing to commit."
+          else
+            git commit -m "chore(data): scheduled market-data refresh [skip ci]"
+            git push
+          fi
