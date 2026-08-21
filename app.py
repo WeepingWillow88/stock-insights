@@ -91,7 +91,9 @@ any column's ℹ️ for a plain-English definition.
   ready-to-trade shortlist (diversified across sectors).
 - **📰 Macro & News** — the market mood (are conditions good for high-beta right now?),
   scheduled events that move everything (inflation/Fed/jobs), and a per-stock **news read**
-  you can expand to see the actual headlines. Has a **🔄 Refresh** button.
+  you can expand to see the actual headlines. Has two refresh buttons: **🔄 Refresh macro &
+  news** (quick — regime/news on today's cached prices) and **⬇️ Pull fresh prices**
+  (re-downloads price history and advances the market-data date).
 - **📈 Track record** — proof, not promises: a **live scorecard** of the app's own past calls,
   and a **backtest** of the rules over ~10 years. Also holds the **circuit-breaker** warning.
 - **📊 Screener** — the raw ranked candidate list plus a price chart for any name.
@@ -126,7 +128,11 @@ any column's ℹ️ for a plain-English definition.
   model), otherwise a simple keyword scan — the active one is labelled on the Macro & News tab.
 - **How fresh is this?** A **🕒 Last updated** stamp sits at the top (and in the sidebar) showing
   when data was last pulled and how long ago — it turns amber if the data looks stale. Each tab
-  also shows its own "as of" time. Hit 🔄 Refresh, or run the update before the open / after the close.
+  also shows its own "as of" time. There are **two** freshness levers on the Macro & News tab:
+  **🔄 Refresh macro & news** re-reads the regime/events/news on the *cached* prices (quick), while
+  **⬇️ Pull fresh prices** re-downloads the full price history and advances the **market-data
+  through** date. The hosted app also auto-refreshes on a daily schedule (before the open / after
+  the close), so most of the time you don't need to press anything.
 
 > ⚠️ High beta moves fast **both ways**. This is decision-support and research — **not financial
 > advice**, and no tool guarantees profit. Your stops, sizing and diversification are what protect you.
@@ -164,8 +170,8 @@ if _run_kind and not pd.isna(_run_kind):
     _bits.append(f"via {_run_kind}")
 _fresh_line = "  ·  ".join(_bits)
 if upd_stale:
-    st.warning(_fresh_line + "  —  this looks **stale**; open the 📰 Macro & News tab and hit 🔄 Refresh "
-               "(or re-run the pipeline) for current numbers.")
+    st.warning(_fresh_line + "  —  this looks **stale**; open the 📰 Macro & News tab and hit "
+               "**⬇️ Pull fresh prices** (or re-run the pipeline) to advance the market-data date.")
 else:
     st.success(_fresh_line)
 
@@ -375,30 +381,53 @@ with tab_screen:
 NEWS_EMOJI = {"negative": "🔴 negative", "positive": "🟢 positive", "neutral": "⚪ neutral"}
 
 with tab_news:
-    top = st.columns([3, 1])
+    top = st.columns([2, 1, 1])
     with top[0]:
         st.subheader("Today's market picture, in plain English")
         st.caption(f"🕒 Last refreshed: **{upd_pretty}**" + (f" ({upd_ago})" if upd_ago else "")
                    + (f"  ·  prices through {_market_through}" if _market_through
                       and not pd.isna(_market_through) else ""))
     with top[1]:
-        if st.button("🔄 Refresh now", use_container_width=True,
-                     help="Re-pull the market regime, macro events, earnings and news. "
-                          "Reuses cached prices, so it takes ~1–2 minutes."):
+        if st.button("🔄 Refresh macro & news", use_container_width=True,
+                     help="Re-pull the market regime, macro events, earnings and news and rebuild "
+                          "signals. Reuses CACHED prices (does not re-download price history), so "
+                          "it's quick (~1–2 min) and does NOT advance the 'market data through' "
+                          "date. Use ‘Pull fresh prices’ for that."):
             from src import pipeline
             with st.spinner("Refreshing macro + news (regime, events, earnings, headlines)…"):
                 try:
                     res = pipeline.refresh_macro_news(CONFIG)
                     load_table.clear()
-                    st.success(f"Refreshed — regime {res['regime']}, "
+                    st.success(f"Macro & news refreshed — regime {res['regime']}, "
                                f"news via {res['news_source']}.")
                     st.rerun()
                 except SystemExit as e:
                     st.error(str(e))
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Refresh failed: {e}")
-    st.caption("Tip: for a hands-off daily refresh, schedule `python -m src.pipeline` "
-               "(cron / Task Scheduler) before the open and after the close.")
+    with top[2]:
+        if st.button("⬇️ Pull fresh prices", use_container_width=True,
+                     help="Re-download the full price history (~500 stocks) and rebuild "
+                          "everything — this is what advances 'market data through' to the latest "
+                          "trading day. Slower (~3–5 min). Note: on the hosted app this updates "
+                          "your current session only; the scheduled daily job updates the shared "
+                          "baseline everyone sees."):
+            from src import pipeline
+            with st.spinner("Downloading fresh prices for the full universe and rebuilding — "
+                            "this can take a few minutes…"):
+                try:
+                    pipeline.run_pipeline(CONFIG, send_digest=False)
+                    load_table.clear()
+                    st.success("Fresh prices pulled — market data advanced to the latest trading day.")
+                    st.rerun()
+                except SystemExit as e:
+                    st.error(str(e))
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Price refresh failed: {e}")
+    st.caption("Tip: the hosted app auto-refreshes daily via a scheduled job (GitHub Actions) "
+               "before the open and after the close. **Refresh macro & news** updates the "
+               "regime/news on cached prices; **Pull fresh prices** re-downloads price history and "
+               "advances the market-data date. Locally you can also run `python -m src.pipeline`.")
 
     # ---- The market backdrop ----
     st.markdown("### 🌡️ The market backdrop")
@@ -799,6 +828,16 @@ free finance-trained model that runs locally (when installed) → a simple **key
 so it always runs. The active engine is labelled on the Macro & News tab. All of this is
 compiled in the **📰 Macro & News tab**, which you can **refresh on demand** or on a schedule.
 
+**Two refresh modes.** *Refresh macro & news* re-pulls the regime, events, earnings and news
+and rebuilds signals **on the prices already stored** — it's quick and is what the daily "did
+anything change?" check uses, but it does **not** move the market-data date. *Pull fresh prices*
+(and the full `python -m src.pipeline`) re-downloads the whole price history and recomputes
+everything — that's what advances **market data through** to the latest trading day. On the
+hosted app a **scheduled job (GitHub Actions)** runs the full pipeline daily before the open and
+after the close, rebuilds the shared `seed.db` baseline and pushes it, so the live app redeploys
+with current prices without anyone pressing a button. (Pressing *Pull fresh prices* in the hosted
+app refreshes your current session only — the cloud filesystem is temporary.)
+
 **Alerts.** Each run (before the open / after the close) emails a digest — or saves it to
 `data/alerts/` if email isn't configured. Between runs, an **hourly news-shock check**
 (`python -m src.shock`) scans for a big intraday move + fresh headline and alerts you.
@@ -858,6 +897,9 @@ moves are close to random; the discipline (stops, sizing, diversification) is wh
         {"Setting": "daily_loss_limit_pct", "Now": c.daily_loss_limit_pct, "What it does": "Circuit-breaker: warn if today's realized losses exceed this % of capital"},
         {"Setting": "backtest_max_hold_days", "Now": c.backtest_max_hold_days, "What it does": "Time-based exit: close a trade after this many days"},
     ])
+    # 'Now' mixes numbers, booleans and the model string — render as text so Arrow
+    # doesn't try (and fail) to coerce the whole column to a number.
+    params["Now"] = params["Now"].astype(str)
     st.dataframe(params, width="stretch", hide_index=True)
     st.caption("Want a change? Just tell me e.g. \"only show beta ≥ 2\", \"use a 3×ATR stop\", "
                "or \"risk 1% per trade\" — I'll update `src/config.py` and re-run.")

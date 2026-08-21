@@ -15,7 +15,11 @@ from . import (data, db, events, ledger, metrics, news, notify, regime, screen,
                signals, universe)
 
 
-def run_pipeline(cfg=CONFIG):
+def run_pipeline(cfg=CONFIG, send_digest=True):
+    """Full refresh: re-download prices for the whole universe, recompute metrics,
+    screen, signals, macro and news, and write everything to the DB. This is what
+    advances `market_through` to the latest trading day. Set send_digest=False to
+    skip the email/notify step (used by the in-app 'Pull fresh prices' button)."""
     print("[1/6] Building universe...")
     tickers = universe.get_universe()
     if cfg.max_tickers:
@@ -104,8 +108,9 @@ def run_pipeline(cfg=CONFIG):
     print(f"      ledger: +{opened} new positions logged, {closed} closed.")
 
     run_kind = os.environ.get("RUN_KIND", "BOD")
-    body = notify.build_digest(run_kind, sig, reg_row, macro_events, fx_rate, cfg)
-    notify.send_or_save(f"[{run_kind}] High-beta signals {run_date}", body, cfg)
+    if send_digest:
+        body = notify.build_digest(run_kind, sig, reg_row, macro_events, fx_rate, cfg)
+        notify.send_or_save(f"[{run_kind}] High-beta signals {run_date}", body, cfg)
 
     _write_meta(cfg, f"full pipeline ({run_kind})", prices)
     print(f"      shortlist: {len(shortlist)} names, signals: {len(sig)} (run {run_date}).")
