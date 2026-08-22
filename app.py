@@ -519,6 +519,9 @@ with tab_track:
             "- **R (risk multiple)** — the unit everything is measured in. If you risk £750 on a "
             "trade, **+1R = +£750**, **−1R = −£750**. Comparing trades in R makes a £2,000 position "
             "and a £6,000 one directly comparable.\n"
+            "- **Profit / loss (£)** — in the closed-trades table, the actual £ you'd have made or "
+            "lost on the recommended number of shares, net of modelled costs. It's simply "
+            "**R × the £ you risked** on that trade.\n"
             "- **Trades** — how many buy setups the rules produced over the period.\n"
             "- **Win rate** — the share of trades that ended in profit. (On its own it's not enough — "
             "a 50% win rate is great if wins are bigger than losses.)\n"
@@ -574,12 +577,31 @@ with tab_track:
         if not opn.empty:
             st.dataframe(opn[["ticker", "record_date", "entry", "stop", "target", "risk_gbp"]],
                          width="stretch", hide_index=True)
-        cl = ledger_df[ledger_df["status"] == "closed"]
+        cl = ledger_df[ledger_df["status"] == "closed"].copy()
         if not cl.empty:
-            st.markdown("**Closed trades:**")
-            st.dataframe(cl[["ticker", "record_date", "exit_date", "outcome", "r_multiple"]]
-                         .sort_values("exit_date", ascending=False),
-                         width="stretch", hide_index=True)
+            # Actual £ P&L on the recommended share count = R × the £ risked (net of modelled costs).
+            cl["pnl_gbp"] = (cl["r_multiple"].astype(float) * cl["risk_gbp"].astype(float)).round(0)
+            cl = cl.sort_values("exit_date", ascending=False)
+            total_pnl = float(cl["pnl_gbp"].sum())
+            st.markdown(f"**Closed trades** — net **£{total_pnl:,.0f}** across {len(cl)} closed:")
+            ccols = [c for c in ["ticker", "record_date", "exit_date", "shares", "entry",
+                                 "exit_price", "outcome", "r_multiple", "pnl_gbp"] if c in cl.columns]
+            st.dataframe(cl[ccols], width="stretch", hide_index=True, column_config={
+                "ticker": st.column_config.TextColumn("Ticker"),
+                "record_date": st.column_config.TextColumn("Opened"),
+                "exit_date": st.column_config.TextColumn("Closed"),
+                "shares": st.column_config.NumberColumn("Shares", format="%d",
+                    help="Share count from the original recommendation."),
+                "entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
+                "exit_price": st.column_config.NumberColumn("Exit", format="$%.2f"),
+                "outcome": st.column_config.TextColumn("Result"),
+                "r_multiple": st.column_config.NumberColumn("R", format="%+.2f",
+                    help="Profit/loss in multiples of the amount risked (+1R = made what you risked)."),
+                "pnl_gbp": st.column_config.NumberColumn("Profit / loss (£)", format="£%d",
+                    help="Actual £ you'd have made/lost on the recommended shares, net of modelled trading costs."),
+            })
+            st.caption("Profit/loss is what the recommended share count would have made or lost, "
+                       "in £, net of modelled trading costs.")
 
     st.markdown("---")
     st.markdown(f"### 🧪 Backtest — how the rules did over ~{CONFIG.backtest_years}")
