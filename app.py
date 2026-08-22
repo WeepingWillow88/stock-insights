@@ -748,14 +748,25 @@ with tab_track:
                        "edge is stable rather than a relic of one era.")
         if not bt_year_df.empty:
             st.markdown("**Edge by year** — steady, or lumpy?")
-            st.dataframe(bt_year_df, width="stretch", hide_index=True, column_config={
+            _by = bt_year_df.copy()
+            _per_r = CONFIG.risk_per_trade * CONFIG.capital_gbp  # £ per 1R (≈ £750)
+            _by["pnl_gbp"] = (_by["expectancy_r"].astype(float) * _by["trades"].astype(float)
+                              * _per_r).round(0)
+            st.dataframe(_by, width="stretch", hide_index=True, column_config={
                 "year": st.column_config.TextColumn("Year"),
                 "trades": st.column_config.NumberColumn("Trades"),
                 "expectancy_r": st.column_config.NumberColumn("Avg trade (R)", format="%.3f"),
                 "win_rate": st.column_config.NumberColumn("Win rate", format="%.1f%%"),
+                "pnl_gbp": st.column_config.NumberColumn("Profit / loss (£)", format="£%d",
+                    help=f"Total R for the year × £{_per_r:,.0f} risked per trade. This is the RULES' "
+                         "aggregate — the backtest takes every qualifying setup across the universe "
+                         "(far more than your 8-position account holds at once), so read it as the "
+                         "edge's shape by year, not a single account's yearly return."),
             })
             st.caption("High-beta momentum makes money in trending years and bleeds in choppy/bear ones "
-                       "(e.g. 2018, 2022) — expected, and exactly why the regime gate and sizing exist.")
+                       "(e.g. 2018, 2022) — expected, and exactly why the regime gate and sizing exist. "
+                       "The £ column assumes ~£{:,.0f} risk per trade across *all* the year's setups "
+                       "(more than 8 slots can hold), so it sizes the edge, not a live account.".format(_per_r))
 
         with st.expander("⚠️ Read this before trusting the backtest"):
             st.markdown(
