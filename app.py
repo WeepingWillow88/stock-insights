@@ -252,13 +252,23 @@ with tab_sig:
             pcols = [c for c in pcols if c in selected.columns]
             st.dataframe(selected[pcols], width="stretch", hide_index=True, column_config=money_cfg)
 
-        # ---- Portfolio summary ----
+        # ---- Portfolio summary (all in £ for consistency; no delta arrows) ----
+        total_pos_gbp = total_pos_usd / fx_rate if fx_rate else 0.0
+        cash_free_gbp = max(CONFIG.capital_gbp - total_pos_gbp, 0.0)
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("BUY signals", int((sig["signal"] == "BUY").sum()))
-        c2.metric("Positions taken", f"{int(selected.shape[0])} / {CONFIG.max_positions}")
-        c3.metric("Capital deployed", f"${total_pos_usd:,.0f}", f"{deployed_pct:.0f}% of capital")
-        c4.metric("Portfolio heat", f"£{total_risk_gbp:,.0f}", f"{heat_pct:.1f}% (cap {CONFIG.max_portfolio_heat*100:.0f}%)")
-        c5.metric("Cash free", f"${max(capital_usd - total_pos_usd, 0):,.0f}")
+        c1.metric("BUY signals", int((sig["signal"] == "BUY").sum()),
+                  help="Stocks that currently rate a BUY (before the portfolio caps are applied).")
+        c2.metric("Positions taken", f"{int(selected.shape[0])} / {CONFIG.max_positions}",
+                  help="How many of your maximum slots the portfolio filled today.")
+        c3.metric("Capital deployed", f"£{total_pos_gbp:,.0f}",
+                  help=f"Cash these positions tie up — {deployed_pct:.0f}% of your £{CONFIG.capital_gbp:,.0f}.")
+        c4.metric("Portfolio heat", f"£{total_risk_gbp:,.0f}",
+                  help=f"Total you'd lose if every stop hit at once — {heat_pct:.1f}% of capital "
+                       f"(ceiling {CONFIG.max_portfolio_heat*100:.0f}%). This is money *at risk*, not money invested.")
+        c5.metric("Cash free", f"£{cash_free_gbp:,.0f}", help="Uninvested cash left over.")
+        st.caption(f"**{deployed_pct:.0f}%** of your £{CONFIG.capital_gbp:,.0f} deployed across "
+                   f"{int(selected.shape[0])} position(s) · **{heat_pct:.1f}%** at risk "
+                   f"(cap {CONFIG.max_portfolio_heat*100:.0f}%) · **{max(100 - deployed_pct, 0):.0f}%** in cash.")
 
         # ---- One-line market-regime badge (full detail on 📰 Macro & News) ----
         if not regime_df.empty:
