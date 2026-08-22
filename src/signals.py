@@ -59,9 +59,13 @@ def _indicators(p, cfg):
     mom_3m = float(adj.iloc[-1] / adj.iloc[-63] - 1) if len(adj) >= 63 else np.nan
     mom_1m = float(adj.iloc[-1] / adj.iloc[-21] - 1) if len(adj) >= 21 else np.nan
     atr = _atr_abs(p["high"].astype(float), p["low"].astype(float), p["close"].astype(float))
+    volume = p["volume"].astype(float)
+    vol_last = float(volume.iloc[-1]) if len(volume) else np.nan
+    vol20 = float(volume.tail(20).mean()) if len(volume) >= 20 else np.nan
     return {
         "price": price, "entry": entry, "sma20": sma20, "sma50": sma50, "sma200": sma200,
         "rsi": rsi, "mom_3m": mom_3m, "mom_1m": mom_1m, "atr": atr,
+        "vol": vol_last, "vol20": vol20,
     }
 
 
@@ -141,17 +145,23 @@ def _scale_sizing(sizing, mult, fx_rate):
 
 
 def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=None,
-                  earnings_map=None, news_map=None):
+                  earnings_map=None, news_map=None, extras_map=None):
     """shortlist: DataFrame with [rank, ticker, beta]. Applies the macro layers:
-    Layer A (regime gate), Layer B (earnings + macro event risk), Layer C (news)."""
+    Layer A (regime gate), Layer B (earnings + macro event risk), Layer C (news),
+    plus the B2/B3 overlay (options IV + short interest) as informational flags."""
     macro_events = macro_events or []
     earnings_map = earnings_map or {}
     news_map = news_map or {}
+    extras_map = extras_map or {}
     regime_label = (regime or {}).get("label", "RISK-ON")
     regime_mult = (regime or {}).get("size_multiplier", 1.0)
 
     imminent = [e for e in macro_events if e["days_until"] <= cfg.macro_event_sizedown_days]
     event_mult = 0.5 if imminent else 1.0
+
+    # Benchmark 3-month momentum, for the relative-strength gate (only buy names beating the S&P).
+    _bench = prices[prices["ticker"] == cfg.benchmark].sort_values("date")["adj_close"].astype(float)
+    spy_mom3 = float(_bench.iloc[-1] / _bench.iloc[-63] - 1) if len(_bench) >= 63 else 0.0
 
     rows = []
     for _, sr in shortlist.sort_values("rank").iterrows():
@@ -161,7 +171,29 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
         if ind is None:
             continue
         signal, reason = generate_signal(ind, cfg)
+        nws = news_map.get(t)
+        conviction = _conviction(ind, nws, cfg)
         flags = []
+
+        # Entry-quality gates — mirror the backtested rules so a live BUY == what was validated:
+        # relative strength (beating the S&P), above-average volume, and a minimum confidence.
+        if signal == "BUY":
+            rs_ok = (not cfg.require_rel_strength) or ((ind.get("mom_3m") or 0) > spy_mom3)
+            _v, _v20 = ind.get("vol"), ind.get("vol20")
+            vol_ok = (not cfg.require_volume_confirm) or (
+                _v is not None and _v20 is not None and not np.isnan(_v)
+                and not np.isnan(_v20) and _v > _v20)
+            conv_ok = conviction >= cfg.min_conviction
+            if not (rs_ok and vol_ok and conv_ok):
+                fails = []
+                if not conv_ok:
+                    fails.append(f"confidence {conviction}% below the {cfg.min_conviction}% bar")
+                if not rs_ok:
+                    fails.append("not beating the S&P (weak relative strength)")
+                if not vol_ok:
+                    fails.append("volume below its 20-day average")
+                signal = "HOLD"
+                reason = "Setup too weak to buy — " + "; ".join(fails)
 
         # Layer B: earnings blackout
         ern = earnings_map.get(t)
@@ -175,8 +207,7 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
         for e in imminent:
             flags.append(f"{e['label']} in {e['days_until']}d")
 
-        # Layer C: news sentiment
-        nws = news_map.get(t)
+        # Layer C: news sentiment (nws fetched above for conviction)
         if nws:
             lbl = nws.get("label", "")
             bias = nws.get("action_bias", "none")
@@ -209,6 +240,10 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
                 signal = "HOLD"
                 reason = "Sized to zero by market conditions; " + reason
 
+        ex = extras_map.get(t) or {}
+        if ex.get("flags"):
+            flags.extend(ex["flags"])
+
         row = {
             "rank": int(sr["rank"]),
             "ticker": t,
@@ -216,8 +251,12 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
             "signal": signal,
             "reason": reason,
             "sector": sr.get("sector", "Unknown"),
-            "conviction": _conviction(ind, nws, cfg),
+            "conviction": conviction,
             "flags": ", ".join(flags),
+            "short_pct_float": ex.get("short_pct_float"),
+            "short_ratio": ex.get("short_ratio"),
+            "iv_atm": ex.get("iv_atm"),
+            "iv_vs_realized": ex.get("iv_vs_realized"),
             "news": (news_map.get(t, {}).get("label", "") if news_map.get(t) else ""),
             "news_note": (news_map.get(t, {}).get("rationale", "")[:140] if news_map.get(t) else ""),
             "rsi": round(ind["rsi"], 0) if not np.isnan(ind["rsi"]) else np.nan,

@@ -53,37 +53,50 @@ def record_recommendations(sig, cfg, today=None):
 
 
 def update_open_positions(prices, cfg):
+    """Resolve open positions with the same exit model as the backtest: a **trailing stop**
+    (locks in gains as the trade runs) OR a **trend break** (a close below the trend SMA), with
+    a time limit as a backstop. Fills are gap-aware. Outcome is win/loss by the realised R."""
     led = _load(cfg)
     if led.empty:
         return 0
+    trail_mult = cfg.trail_atr_mult
     changed = 0
     for idx, row in led[led["status"] == "open"].iterrows():
-        p = prices[prices["ticker"] == row["ticker"]].copy()
+        p = prices[prices["ticker"] == row["ticker"]].sort_values("date").copy()
         if p.empty:
             continue
-        bars = p[p["date"] > str(row["record_date"])].sort_values("date")
+        p["sma_trend"] = p["close"].astype(float).rolling(cfg.trend_exit_sma).mean()
+        bars = p[p["date"] > str(row["record_date"])]
         if bars.empty:
             continue
-        entry, stop, target = float(row["entry"]), float(row["stop"]), float(row["target"])
-        outcome, exit_price, exit_date = None, None, None
+        entry, stop = float(row["entry"]), float(row["stop"])
+        atr0 = (entry - stop) / cfg.atr_stop_mult if cfg.atr_stop_mult else (entry - stop)
+        hh = entry  # highest close since entry (the "run-up high" the trail hangs off)
+        outcome = exit_price = exit_date = None
         held = 0
         for _, b in bars.iterrows():
             held += 1
-            if float(b["low"]) <= stop:
-                outcome, exit_price, exit_date = "loss", stop, b["date"]
+            close, low = float(b["close"]), float(b["low"])
+            op = float(b["open"]) if pd.notna(b["open"]) else close
+            hh = max(hh, close)
+            trail = max(stop, hh - trail_mult * atr0)  # never below the initial stop
+            if low <= trail:  # trailing / initial stop hit — gap-aware fill at the open if it gapped
+                exit_price = min(trail, op) if op < trail else trail
+                outcome, exit_date = "stop", b["date"]
                 break
-            if float(b["high"]) >= target:
-                outcome, exit_price, exit_date = "win", target, b["date"]
+            sma = b["sma_trend"]
+            if pd.notna(sma) and close < float(sma):  # trend broke — close below the trend SMA
+                exit_price, outcome, exit_date = close, "trend", b["date"]
                 break
         if outcome is None and held >= cfg.ledger_max_hold_days:
             last = bars.iloc[-1]
-            outcome, exit_price, exit_date = "timeout", float(last["close"]), last["date"]
+            exit_price, outcome, exit_date = float(last["close"]), "time", last["date"]
         if outcome:
             stop_dist = entry - stop
             net = (exit_price / entry - 1) - cfg.backtest_cost_pct
             r = net / (stop_dist / entry) if stop_dist > 0 else 0.0
             led.loc[idx, ["status", "exit_date", "exit_price", "r_multiple", "outcome"]] = \
-                ["closed", exit_date, round(exit_price, 2), round(r, 2), outcome]
+                ["closed", exit_date, round(exit_price, 2), round(r, 2), "win" if r > 0 else "loss"]
             changed += 1
     if changed:
         db.write_df(led, "ledger", cfg.db_path)

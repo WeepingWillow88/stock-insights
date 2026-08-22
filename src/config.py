@@ -66,6 +66,13 @@ class Config:
     rsi_period: int = 14
     rsi_overbought: float = 70.0
     rsi_min_buy: float = 45.0      # below this, momentum too weak to enter
+    # Entry-quality gates — make live BUYs match the backtested (validated) rules:
+    min_conviction: int = 75            # only BUY when >= this % of independent checks agree
+    require_rel_strength: bool = True   # only BUY names beating the S&P (3-month relative strength)
+    require_volume_confirm: bool = True # only BUY on above-average volume (confirmation)
+    # Exit model — shared by the live ledger AND the backtest: trailing stop + trend break
+    trail_atr_mult: float = 2.5         # trail the stop this many ATRs below the run-up high
+    trend_exit_sma: int = 20            # also exit if price closes below this SMA (trend break)
     fx_pair: str = "GBPUSD=X"      # convert £ capital -> $ for US-stock sizing
     fx_fallback: float = 1.27      # used only if the live FX fetch fails
 
@@ -83,6 +90,11 @@ class Config:
     news_headlines: int = 8               # headlines pulled per ticker
     news_avoid_downgrades_buy: bool = True  # a strongly negative news read turns BUY -> HOLD
 
+    # --- Options-implied vol + short-interest overlays (B2 / B3, best-effort via yfinance) ---
+    fetch_market_extras: bool = True      # pull IV + short interest for the shortlist each run
+    high_short_pct_float: float = 0.15    # flag when short interest >= this % of float (squeeze fuel)
+    iv_rich_ratio: float = 1.5            # flag when ATM implied vol >= this x recent realized vol
+
     # --- Hourly news-shock alert ---
     shock_move_pct: float = 0.05          # a >=5% intraday move triggers a news look
 
@@ -92,8 +104,8 @@ class Config:
     backtest_max_hold_days: int = 40      # backstop time exit (trailing/trend exits do the work)
     backtest_cost_pct: float = 0.001      # 0.1% round-trip slippage + commission per trade
     # Improved exits (1): trailing stop + trend-break instead of a fixed time clock
-    backtest_trail_atr_mult: float = 2.5  # trail the stop this many ATRs below the run-up high
-    backtest_trend_exit_sma: int = 20     # also exit if price closes below its 20-day average
+    # (trailing-stop + trend-break exit params are shared with live signals — see trail_atr_mult
+    #  / trend_exit_sma above)
     # Higher-quality entries (2) + regime gate (3)
     backtest_min_conviction: int = 75     # only take setups where >= this % of checks agree
     backtest_use_regime: bool = True      # only buy when the S&P 500 is in an uptrend

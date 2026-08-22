@@ -99,10 +99,12 @@ rules, the sizing maths, and how the daily refresh works.
 | Term | Plain meaning |
 |---|---|
 | **Beta / "jumpiness"** | How much a stock moves vs the market. 2 ≈ twice as much, up *and* down |
-| **Confidence %** | How many independent checks agree (trend, momentum, RSI, news). Higher = surer |
+| **Confidence %** | How many independent checks agree (trend, momentum, RSI, news). A BUY must clear a minimum bar |
 | **RSI / "momentum"** | 0–100 gauge. >70 overheated, <30 beaten-down; 45–65 is the healthy buy zone |
 | **Daily swing (ATR)** | Typical size of a day's move — sets how wide the safety-exit sits |
 | **News mood** | 🔴/⚪/🟢 read of recent headlines (engine shown on the Macro & News tab) |
+| **Short interest** | Shares bet against the stock, as % of float. High = squeeze fuel but crowded |
+| **Implied vol (IV)** | The move options are pricing in. IV well above recent *realized* moves = event brewing |
 | **R (risk multiple)** | Track-record unit: +1R = made what you risked, −1R = hit your stop |
 | **Regime** | Whether market conditions favour high-beta (RISK-ON) or not (RISK-OFF) |
 
@@ -228,10 +230,13 @@ with tab_sig:
                      help="Industry group. The portfolio caps how many picks come from one "
                           "sector so your positions aren't secretly one big bet."),
             "flags": st.column_config.TextColumn("Flags",
-                     help="Extra context: upcoming earnings, a market-moving event soon, "
-                          "or a notable news read."),
+                     help="Extra context: upcoming earnings, a market-moving event soon, a notable "
+                          "news read, high short interest (squeeze fuel), or rich options "
+                          "(IV pricing a big move). Full IV/short table on the Macro & News tab."),
             "reason": st.column_config.TextColumn("Why", width="large",
-                     help="Plain-English reason behind this call."),
+                     help="Plain-English reason behind this call. A BUY must also beat the S&P "
+                          "(relative strength), trade on above-average volume, and clear the "
+                          "confidence bar."),
         }
 
         # ---- Lead with the actionable buy list ----
@@ -469,6 +474,38 @@ with tab_news:
                 else:
                     st.caption("No recent headlines found.")
 
+    # ---- B2/B3: options-implied vol + short-interest overlay ----
+    st.markdown("### 🔎 Squeeze & volatility watch")
+    if signals_df.empty or "iv_atm" not in signals_df.columns:
+        st.caption("No options / short-interest data yet — run a refresh or the pipeline.")
+    else:
+        _ex = signals_df.copy()
+        _ex = _ex[_ex[["short_pct_float", "iv_atm"]].notna().any(axis=1)]
+        if _ex.empty:
+            st.caption("No options / short-interest data available right now.")
+        else:
+            _ex["short_pct"] = (_ex["short_pct_float"] * 100).round(1)
+            _ex["iv_pct"] = (_ex["iv_atm"] * 100).round(0)
+            _ex = _ex.sort_values("short_pct_float", ascending=False)
+            st.caption("Two extras that move high-beta names hard: **short interest** (heavily "
+                       "shorted = squeeze fuel, but crowded) and **implied vs realized volatility** "
+                       "(options pricing a bigger move than the stock has been making — often a "
+                       "coming event). Shown for context; they flag a name but don't block a BUY.")
+            st.dataframe(
+                _ex[["ticker", "signal", "short_pct", "short_ratio", "iv_pct", "iv_vs_realized"]].head(25),
+                width="stretch", hide_index=True,
+                column_config={
+                    "signal": st.column_config.TextColumn("Call"),
+                    "short_pct": st.column_config.NumberColumn("Short % float", format="%.1f%%",
+                        help="Shares sold short as a % of tradable float. High = squeeze potential and a crowded short."),
+                    "short_ratio": st.column_config.NumberColumn("Days to cover", format="%.1f",
+                        help="Days of average volume for shorts to buy back — higher = more squeeze fuel."),
+                    "iv_pct": st.column_config.NumberColumn("Implied vol", format="%d%%",
+                        help="At-the-money options' annualised implied volatility — the move the market is pricing in."),
+                    "iv_vs_realized": st.column_config.NumberColumn("IV ÷ realized", format="%.2f",
+                        help="Implied vs recent realized vol. Well above 1 = options pricing a much bigger move than the stock has made (often pre-earnings)."),
+                })
+
 # =================== TRACK RECORD TAB ===================
 with tab_track:
     st.subheader("How the recommendations actually perform")
@@ -493,8 +530,11 @@ with tab_track:
             "- **Worst drop (max drawdown)** — the biggest peak-to-trough fall along the way — i.e. "
             "the losing streak you'd have had to stomach. Smaller is easier to live with.\n"
             "- **Avg hold** — how many days a trade lasted on average.\n"
-            "- **Timed out** — the share of trades that never hit their target or stop and were "
-            "closed on the time limit (your 'don't hold too long' rule).")
+            "- **How trades are closed** — a **trailing stop** (ratchets up as the trade runs, locking "
+            "in gains) or a **trend break** (a close below the trend average), with a time limit as a "
+            "backstop. This is the exit the live scorecard scores, so it matches how you'd manage it.\n"
+            "- **Timed out** — the share of trades that hit neither the trailing stop nor a trend break "
+            "and were closed on the time limit (the 'don't hold too long' rule).")
 
     # Circuit-breaker: today's realized losses
     if not ledger_df.empty and "status" in ledger_df.columns:
@@ -723,7 +763,7 @@ beta and positive trend.** The weights (0.6 / 0.4 / 0.5 bonus) are all adjustabl
 |---|---|
 | 🔴 **SELL** | Price drops **below its 50-day average** (trend broken), or it's weak (RSI < 35) and not trending |
 | 🟡 **HOLD** | Up-trend but **overbought** (RSI ≥ **{c.rsi_overbought:.0f}**, wait for a pullback), or momentum cooling (RSI < **{c.rsi_min_buy:.0f}**), or no clear setup |
-| 🟢 **BUY** | Up-trend **and** positive momentum **and** RSI in the healthy band (**{c.rsi_min_buy:.0f}–{c.rsi_overbought:.0f}**) |
+| 🟢 **BUY** | Up-trend **and** positive momentum **and** healthy RSI (**{c.rsi_min_buy:.0f}–{c.rsi_overbought:.0f}**) — **and** it clears three quality gates: **beating the S&P** (relative strength), **above-average volume**, and **confidence ≥ {c.min_conviction}%**. These mirror the backtested rules, so a live BUY is the same setup the backtest validated. |
 
 #### Step 6 — Size the position (for BUY signals)
 Your rules drive the maths:
@@ -735,6 +775,11 @@ Your rules drive the maths:
   2. `(£{c.capital_gbp:,.0f} ÷ {c.max_positions} positions) ÷ entry price` (equal-weight capital slot).
 
   Taking the smaller means you **never risk more than £{risk_gbp:,.0f}** *and* **never overspend one slot**.
+- **Managing the exit** — the initial stop is your safety net, but the trade is then **trailed**: as it
+  runs, ratchet the stop up to **{c.trail_atr_mult:.1f} × ATR below the highest close so far**, and also
+  **exit on a close below its {c.trend_exit_sma}-day average** (a broken trend). The 2:1 target is a
+  reference, not a hard ceiling — trailing lets winners run and cuts losers early. The **track record
+  scores trades exactly this way**, so the live scorecard reflects the rules you'd actually follow.
 
 #### Step 7 — Build the portfolio
 Take the **top {c.max_positions} BUY signals** by rank (your max positions). Because each risks
@@ -785,6 +830,17 @@ get flagged. Scoring uses the best engine available, in order: the **Claude API*
 free finance-trained model that runs locally (when installed) → a simple **keyword** scan —
 so it always runs. The active engine is labelled on the Macro & News tab. All of this is
 compiled in the **📰 Macro & News tab**, which you can **refresh on demand** or on a schedule.
+
+**Layer D — options & short interest.** Two extras that move high-beta names hard, shown in the
+**🔎 Squeeze & volatility watch** table and as **flags**:
+- **Short interest** — shares sold short as a % of float, plus *days-to-cover*. Heavily-shorted
+  names (≥ **{c.high_short_pct_float*100:.0f}%** of float) are **squeeze fuel** (violent up moves) but
+  crowded and crash-prone; the app flags them so you size with eyes open.
+- **Implied vs realized volatility** — when at-the-money options price a move **≥ {c.iv_rich_ratio:.1f}×**
+  the stock's recent realized move, the market is bracing for something (often earnings). Buying
+  into rich IV is how you can be right on direction yet lose on the vol crush — so it's flagged.
+
+These are **informational** — they flag a name and inform sizing, but don't by themselves block a BUY.
 
 **Two refresh modes.** *Refresh macro & news* re-pulls the regime, events, earnings and news
 and rebuilds signals **on the prices already stored** — it's quick and is what the daily "did
@@ -842,6 +898,8 @@ moves are close to random; the discipline (stops, sizing, diversification) is wh
          "What it does": "How far the safety-exit sits below the buy price"},
         {"Setting": "Reward : risk", "Now": f"{c.reward_risk:.0f}:1",
          "What it does": "Profit target set this many times the risk taken"},
+        {"Setting": "Min confidence to buy", "Now": f"{c.min_conviction}%",
+         "What it does": "A BUY must clear this + beat the S&P + above-average volume"},
         {"Setting": "Max positions", "Now": str(c.max_positions),
          "What it does": "Most trades held at once"},
         {"Setting": "Trading capital", "Now": f"£{c.capital_gbp:,.0f}",

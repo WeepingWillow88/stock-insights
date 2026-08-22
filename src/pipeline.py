@@ -11,8 +11,8 @@ import os
 import pandas as pd
 
 from .config import CONFIG
-from . import (data, db, events, ledger, metrics, news, notify, regime, screen,
-               signals, universe)
+from . import (data, db, events, ledger, marketdata, metrics, news, notify, regime,
+               screen, signals, universe)
 
 
 def run_pipeline(cfg=CONFIG, send_digest=True):
@@ -72,9 +72,13 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
     src = "claude" if any(v.get("source") == "claude" for v in news_map.values()) else "keywords"
     print(f"      scored news for {len(news_map)} names (sentiment source: {src}).")
 
+    extras_map = (marketdata.build_extras_map(shortlist["ticker"].tolist(), prices, cfg)
+                  if cfg.fetch_market_extras else {})
+    print(f"      market extras (IV + short interest) for {len(extras_map)} names.")
+
     print("      Generating signals + position sizing...")
     sig = signals.build_signals(prices, shortlist, cfg, fx_rate, reg, macro_events,
-                                earnings, news_map)
+                                earnings, news_map, extras_map)
     sig["run_date"] = run_date
     sig["fx_rate"] = fx_rate
     n_buy = int((sig["signal"] == "BUY").sum()) if not sig.empty else 0
@@ -162,8 +166,10 @@ def refresh_macro_news(cfg=CONFIG):
     earnings = events.earnings_dates(shortlist["ticker"].tolist(),
                                      within_days=cfg.earnings_lookahead_days)
     news_map = news.build_news_map(shortlist["ticker"].tolist(), cfg)
+    extras_map = (marketdata.build_extras_map(shortlist["ticker"].tolist(), prices, cfg)
+                  if cfg.fetch_market_extras else {})
     sig = signals.build_signals(prices, shortlist, cfg, fx_rate, reg, macro_events,
-                                earnings, news_map)
+                                earnings, news_map, extras_map)
     sig["run_date"] = run_date
     sig["fx_rate"] = fx_rate
 

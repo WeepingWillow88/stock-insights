@@ -94,7 +94,7 @@ def _prep(prices, cfg):
             "ticker": t,
             "a": a.values, "c": a.values, "hi": hi_adj.values, "lo": lo_adj.values,
             "open": op_adj.values,
-            "sma20": a.rolling(cfg.backtest_trend_exit_sma).mean().values,
+            "sma20": a.rolling(cfg.trend_exit_sma).mean().values,
             "sma50": a.rolling(50).mean().values, "sma200": a.rolling(200).mean().values,
             "rsi": _rsi(a).values, "atr": _atr(hi_adj, lo_adj, a).values,
             "vol": vol[t].values, "vol20": vol[t].rolling(20).mean().values,
@@ -106,7 +106,7 @@ def _prep(prices, cfg):
 
 def _simulate(prep, spy_up, spy_mom3, dates, cfg, stop_mult=None):
     stop_mult = cfg.atr_stop_mult if stop_mult is None else stop_mult
-    trail_mult, max_hold, cost = cfg.backtest_trail_atr_mult, cfg.backtest_max_hold_days, cfg.backtest_cost_pct
+    trail_mult, max_hold, cost = cfg.trail_atr_mult, cfg.backtest_max_hold_days, cfg.backtest_cost_pct
     trades = []
     for d in prep:
         a, c, hi, lo, op = d["a"], d["c"], d["hi"], d["lo"], d["open"]
