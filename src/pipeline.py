@@ -20,6 +20,11 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
     screen, signals, macro and news, and write everything to the DB. This is what
     advances `market_through` to the latest trading day. Set send_digest=False to
     skip the email/notify step (used by the in-app 'Pull fresh prices' button)."""
+    # Carry over accumulated state (esp. the track-record ledger) from the shipped snapshot.
+    # On the daily GitHub Action only seed.db is checked out, so without this the ledger would
+    # start empty every run and never show a closed trade.
+    if db.bootstrap_working_db(cfg.db_path):
+        print("      seeded working DB from snapshot (carrying the ledger forward).")
     print("[1/6] Building universe...")
     tickers = universe.get_universe()
     if cfg.max_tickers:

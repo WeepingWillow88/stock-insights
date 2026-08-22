@@ -5,7 +5,6 @@ Run with:  streamlit run app.py
 """
 import datetime as dt
 import os
-import shutil
 import sqlite3
 
 import pandas as pd
@@ -22,37 +21,10 @@ try:
 except Exception:  # noqa: BLE001 - no secrets file locally is fine
     pass
 
-_seed_path = "data/seed.db"
-
-
-def _market_through_of(path):
-    """Latest market date recorded in a DB's meta table, or None if unavailable."""
-    if not os.path.exists(path):
-        return None
-    try:
-        conn = sqlite3.connect(path)
-        try:
-            row = conn.execute("SELECT market_through FROM meta LIMIT 1").fetchone()
-            return row[0] if row else None
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001
-        return None
-
-
-if os.path.exists(_seed_path):
-    # Seed the working DB on first run, AND re-seed when the shipped snapshot covers a LATER
-    # market date than the working copy. On Streamlit Cloud a redeploy ships a fresh seed.db but a
-    # stale working DB can persist in the container; comparing the covered date (ISO strings sort
-    # correctly) picks up newer data there. Comparing the date rather than the file mtime avoids
-    # clobbering a richer local working DB (e.g. one holding the backtest price cache) when the
-    # data is already current — locally seed.db is always newer by mtime but not by data.
-    _seed_through = _market_through_of(_seed_path)
-    _work_through = _market_through_of(CONFIG.db_path)
-    if not os.path.exists(CONFIG.db_path) or (
-            _seed_through and _work_through and str(_seed_through) > str(_work_through)):
-        os.makedirs(os.path.dirname(CONFIG.db_path) or ".", exist_ok=True)
-        shutil.copy(_seed_path, CONFIG.db_path)
+# Seed the working DB on first run, and re-seed when a Cloud redeploy ships a snapshot covering
+# a later market date than a stale in-container copy. (Shared with the pipeline — see db.py.)
+from src import db as _db
+_db.bootstrap_working_db(CONFIG.db_path, "data/seed.db", refresh_if_newer=True)
 
 # --- Optional password gate (set APP_PASSWORD in Streamlit secrets to enable) ---
 _pw = os.environ.get("APP_PASSWORD")
