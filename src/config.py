@@ -46,6 +46,8 @@ class Config:
     benchmark: str = "SPY"
 
     # --- Data ---
+    universe_scope: str = "sp500"           # "sp500" or "sp1500" (adds S&P 400 mid + 600 small caps —
+    #                                         more high-beta candidates, but a heavier daily run)
     history_period: str = "1y"              # yfinance lookback
     beta_window: int = 252                  # trading days used for beta
 
@@ -73,6 +75,12 @@ class Config:
     # Exit model — shared by the live ledger AND the backtest: trailing stop + trend break
     trail_atr_mult: float = 2.5         # trail the stop this many ATRs below the run-up high
     trend_exit_sma: int = 20            # also exit if price closes below this SMA (trend break)
+    # Portfolio construction
+    max_position_correlation: float = 0.80  # don't add a pick this correlated with one already held
+    corr_window: int = 60                    # trading days of returns used for the correlation cap
+    # Edge-weighted sizing: scale size by confidence (a fractional-Kelly proxy), never above full risk
+    edge_weighted_sizing: bool = True
+    edge_size_floor: float = 0.5             # lowest-confidence BUY still gets this fraction of full size
     fx_pair: str = "GBPUSD=X"      # convert £ capital -> $ for US-stock sizing
     fx_fallback: float = 1.27      # used only if the live FX fetch fails
 
@@ -102,7 +110,10 @@ class Config:
     backtest_years: str = "10y"           # how much history to replay (incl. bear markets)
     backtest_universe_max: int = 120      # cap to the most liquid high-beta names for speed
     backtest_max_hold_days: int = 40      # backstop time exit (trailing/trend exits do the work)
-    backtest_cost_pct: float = 0.001      # 0.1% round-trip slippage + commission per trade
+    backtest_cost_pct: float = 0.001      # base round-trip slippage + commission per trade
+    backtest_spread_atr_coef: float = 0.05  # realistic extra cost = this x ATR% (jumpy names cost
+    #                                         more to trade — wider spreads/slippage). Applied in
+    #                                         the backtest AND the live ledger for an honest R.
     # Improved exits (1): trailing stop + trend-break instead of a fixed time clock
     # (trailing-stop + trend-break exit params are shared with live signals — see trail_atr_mult
     #  / trend_exit_sma above)

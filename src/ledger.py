@@ -93,7 +93,8 @@ def update_open_positions(prices, cfg):
             exit_price, outcome, exit_date = float(last["close"]), "time", last["date"]
         if outcome:
             stop_dist = entry - stop
-            net = (exit_price / entry - 1) - cfg.backtest_cost_pct
+            trade_cost = cfg.backtest_cost_pct + cfg.backtest_spread_atr_coef * (atr0 / entry)
+            net = (exit_price / entry - 1) - trade_cost
             r = net / (stop_dist / entry) if stop_dist > 0 else 0.0
             led.loc[idx, ["status", "exit_date", "exit_price", "r_multiple", "outcome"]] = \
                 ["closed", exit_date, round(exit_price, 2), round(r, 2), "win" if r > 0 else "loss"]

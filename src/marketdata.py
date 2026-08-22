@@ -32,6 +32,19 @@ def _atm_iv(yft, spot):
         return None
 
 
+def _analyst_net(yft):
+    """Net analyst upgrades − downgrades over the most recent actions (a revision-momentum proxy).
+    Free/best-effort via yfinance; a paid estimate-revisions feed would be sharper. None on failure."""
+    try:
+        ud = yft.upgrades_downgrades
+        if ud is None or ud.empty or "Action" not in ud.columns:
+            return None
+        acts = ud.sort_index().tail(15)["Action"].astype(str).str.lower()
+        return int((acts == "up").sum() - (acts == "down").sum())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _realized_vol(prices, ticker, window=21):
     """Annualised realized vol from the last `window` daily returns, or None."""
     p = prices[prices["ticker"] == ticker].sort_values("date")["adj_close"].astype(float)
@@ -49,7 +62,7 @@ def extras_for(ticker, prices, cfg, yft=None):
     import yfinance as yf
 
     rec = {"short_pct_float": None, "short_ratio": None, "iv_atm": None,
-           "iv_vs_realized": None, "flags": []}
+           "iv_vs_realized": None, "analyst_net": None, "flags": []}
     try:
         yft = yft or yf.Ticker(ticker)
         info = yft.info or {}
@@ -59,6 +72,7 @@ def extras_for(ticker, prices, cfg, yft=None):
         spot = info.get("currentPrice") or info.get("regularMarketPrice")
         iv = _atm_iv(yft, float(spot)) if spot else None
         rec["iv_atm"] = round(iv, 4) if iv else None
+        rec["analyst_net"] = _analyst_net(yft)
     except Exception:  # noqa: BLE001
         pass
 
@@ -70,6 +84,10 @@ def extras_for(ticker, prices, cfg, yft=None):
         rec["flags"].append(f"high short interest ({rec['short_pct_float'] * 100:.0f}% of float)")
     if rec["iv_vs_realized"] is not None and rec["iv_vs_realized"] >= cfg.iv_rich_ratio:
         rec["flags"].append("rich options (IV >> realized — big move priced in)")
+    if rec["analyst_net"] is not None and rec["analyst_net"] >= 2:
+        rec["flags"].append(f"analysts upgrading (+{rec['analyst_net']} net)")
+    elif rec["analyst_net"] is not None and rec["analyst_net"] <= -2:
+        rec["flags"].append(f"analysts downgrading ({rec['analyst_net']} net)")
     return rec
 
 

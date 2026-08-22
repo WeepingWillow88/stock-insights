@@ -144,6 +144,21 @@ def _scale_sizing(sizing, mult, fx_rate):
     return s
 
 
+def _return_corr(prices, tickers, window):
+    """Correlation matrix of recent daily returns for `tickers` (or None if too little data)."""
+    try:
+        piv = (prices[prices["ticker"].isin(tickers)]
+               .pivot_table(index="date", columns="ticker", values="adj_close").sort_index())
+    except Exception:  # noqa: BLE001
+        return None
+    if piv.shape[1] < 2 or len(piv) < 20:
+        return None
+    rets = piv.pct_change().dropna(how="all").tail(window)
+    if len(rets) < 10:
+        return None
+    return rets.corr()
+
+
 def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=None,
                   earnings_map=None, news_map=None, extras_map=None):
     """shortlist: DataFrame with [rank, ticker, beta]. Applies the macro layers:
@@ -233,6 +248,13 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
                 if imminent:
                     reason += " (major data imminent — size reduced)"
 
+        # C3: edge-weighted sizing — scale size by confidence (a fractional-Kelly proxy), so
+        # marginal setups get less capital. Never exceeds the full per-trade risk.
+        if signal == "BUY" and cfg.edge_weighted_sizing:
+            span = max(1, 100 - cfg.min_conviction)
+            frac = min(1.0, max(0.0, (conviction - cfg.min_conviction) / span))
+            eff_mult *= cfg.edge_size_floor + (1 - cfg.edge_size_floor) * frac
+
         sizing = size_position(ind["entry"], ind["atr"], cfg, fx_rate) if signal == "BUY" else None
         if sizing and eff_mult < 1.0:
             sizing = _scale_sizing(sizing, eff_mult, fx_rate)
@@ -257,6 +279,7 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
             "short_ratio": ex.get("short_ratio"),
             "iv_atm": ex.get("iv_atm"),
             "iv_vs_realized": ex.get("iv_vs_realized"),
+            "analyst_net": ex.get("analyst_net"),
             "news": (news_map.get(t, {}).get("label", "") if news_map.get(t) else ""),
             "news_note": (news_map.get(t, {}).get("rationale", "")[:140] if news_map.get(t) else ""),
             "rsi": round(ind["rsi"], 0) if not np.isnan(ind["rsi"]) else np.nan,
@@ -282,6 +305,9 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
     chosen = 0
     heat_gbp = 0.0
     heat_cap_gbp = cfg.max_portfolio_heat * cfg.capital_gbp  # total £-at-risk ceiling
+    # C2: return-correlation matrix over the BUY candidates, to avoid stacking one macro bet.
+    corr = _return_corr(prices, df[df["signal"] == "BUY"]["ticker"].tolist(), cfg.corr_window)
+    picked = []
     for i, r in df[df["signal"] == "BUY"].sort_values("rank").iterrows():
         if chosen >= cfg.max_positions:
             break
@@ -291,8 +317,14 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
         r_gbp = float(r.get("risk_gbp") or 0)
         if heat_cap_gbp and heat_gbp + r_gbp > heat_cap_gbp:
             continue  # would breach the portfolio-heat ceiling — skip (a smaller pick may still fit)
+        t = r["ticker"]
+        if corr is not None and picked and t in corr.index:  # correlation cap
+            near = [abs(corr.loc[t, s]) for s in picked if s in corr.columns]
+            if near and max(near) >= cfg.max_position_correlation:
+                continue  # moves in lockstep with a pick already held — skip for real diversification
         df.loc[i, "selected"] = True
         sector_count[sec] = sector_count.get(sec, 0) + 1
         heat_gbp += r_gbp
+        picked.append(t)
         chosen += 1
     return df

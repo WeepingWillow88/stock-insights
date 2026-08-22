@@ -122,6 +122,7 @@ ledger_df = load_table("ledger")
 bt_summary_df = load_table("backtest_summary")
 bt_trades_df = load_table("backtest_trades")
 bt_sens_df = load_table("backtest_sensitivity")
+bt_year_df = load_table("backtest_by_year")
 meta_df = load_table("meta")
 
 if shortlist.empty:
@@ -560,6 +561,12 @@ with tab_track:
         c[3].metric("Avg win / loss", f"{ls['avg_win_r']:+.1f}R / {ls['avg_loss_r']:+.1f}R")
         c[4].metric("Total", f"{ls['total_r']:+.1f}R")
         st.caption(ls.get("note", ""))
+        # D3: let the live results referee the backtest
+        if not bt_summary_df.empty and pd.notna(bt_summary_df.iloc[0].get("expectancy_r")):
+            _bt = float(bt_summary_df.iloc[0]["expectancy_r"])
+            st.caption(f"📏 **Live vs backtest:** live is **{ls['expectancy_r']:+.2f}R/trade** vs the "
+                       f"backtest's **{_bt:+.2f}R**. Over enough live trades these should converge — a "
+                       "big, persistent gap means the edge is decaying (or the live sample is still tiny).")
 
     if not ledger_df.empty:
         opn = ledger_df[ledger_df["status"] == "open"]
@@ -576,8 +583,9 @@ with tab_track:
 
     st.markdown("---")
     st.markdown(f"### 🧪 Backtest — how the rules did over ~{CONFIG.backtest_years}")
-    st.caption("Uses the **upgraded rules**: trailing-stop + trend-break exits (gap-aware fills), "
-               "and entries filtered for conviction, volume, relative strength and a rising market.")
+    st.caption("Uses the **upgraded rules** — trailing-stop + trend-break exits (gap-aware), entries "
+               "filtered for conviction, volume, relative strength and a rising market — with "
+               "**realistic vol-scaled costs** and an **out-of-sample** check below.")
     # Detect a hosted deployment: Streamlit Community Cloud checks the repo out under /mount/src;
     # (legacy Heroku set DYNO). The heavy multi-year backtest download is disabled there.
     on_cloud = os.path.isdir("/mount/src") or bool(os.environ.get("DYNO"))
@@ -706,16 +714,37 @@ with tab_track:
             st.caption("The edge should stay positive across nearby stop widths — if it only works "
                        "at one exact number, that's a red flag for over-fitting.")
 
+        # D2 — out-of-sample stability (time split) + per-year edge
+        _oe, _or = s.get("oos_earlier_exp_r"), s.get("oos_recent_exp_r")
+        if _oe is not None and _or is not None:
+            st.markdown("**Does the edge hold out-of-sample?** (a time split — not a re-shuffle of the same trades)")
+            oc = st.columns(2)
+            oc[0].metric("Earlier ~70% of history", f"{float(_oe):+.3f}R/trade")
+            oc[1].metric(f"Recent ~30% (from {str(s.get('oos_split_date'))[:7]})", f"{float(_or):+.3f}R/trade",
+                         help=f"{int(s.get('oos_recent_trades') or 0)} trades in the slice the earlier period never informed.")
+            st.caption("If the recent, unseen slice is still positive and close to the earlier one, the "
+                       "edge is stable rather than a relic of one era.")
+        if not bt_year_df.empty:
+            st.markdown("**Edge by year** — steady, or lumpy?")
+            st.dataframe(bt_year_df, width="stretch", hide_index=True, column_config={
+                "year": st.column_config.TextColumn("Year"),
+                "trades": st.column_config.NumberColumn("Trades"),
+                "expectancy_r": st.column_config.NumberColumn("Avg trade (R)", format="%.3f"),
+                "win_rate": st.column_config.NumberColumn("Win rate", format="%.1f%%"),
+            })
+            st.caption("High-beta momentum makes money in trending years and bleeds in choppy/bear ones "
+                       "(e.g. 2018, 2022) — expected, and exactly why the regime gate and sizing exist.")
+
         with st.expander("⚠️ Read this before trusting the backtest"):
             st.markdown(
                 "- **Survivorship bias:** uses today's S&P 500 — failed companies are excluded, "
                 "so real-world results would be somewhat worse.\n"
                 "- **Technicals only:** the news + macro layers aren't replayed (no historical news feed) — "
                 "the *live scorecard* above does include them.\n"
-                f"- **Modelled fills:** entries at daily close with a flat "
-                f"{CONFIG.backtest_cost_pct*100:.1f}% cost. Stops are **gap-aware** (filled at the "
-                "open if price gaps below the stop), so overnight-gap losses are captured — but real "
-                "spreads on volatile names can still be a touch worse.\n"
+                f"- **Realistic, vol-scaled costs:** a base {CONFIG.backtest_cost_pct*100:.1f}% plus an "
+                "extra slice proportional to each name's daily swing (jumpier stocks cost more to "
+                "trade) — the same cost the live scorecard applies. Stops are **gap-aware** (filled at "
+                "the open if price gaps below), so overnight-gap losses are captured.\n"
                 "- **Past ≠ future.** This shows whether the rules *had* an edge, not a promise they will.")
 
 # =================== HOW IT WORKS TAB ===================
@@ -731,8 +760,9 @@ bold is a setting you can ask to change** (they live in `src/config.py`).
 ---
 
 #### Step 1 — Pick the universe
-Start with the **S&P 500** (a reliable, liquid list). Anyone can ask to widen this to the
-Russell 1000–3000 later.
+Start with the **S&P 500** (a reliable, liquid list). Can be widened to the **S&P 1500** (adds
+mid- and small-caps — more high-beta candidates; the liquidity filters still prune the illiquid
+ones) via the `universe_scope` setting.
 
 #### Step 2 — Keep only *tradable* stocks
 A stock must pass **both** filters or it's dropped:
@@ -782,9 +812,14 @@ Your rules drive the maths:
   scores trades exactly this way**, so the live scorecard reflects the rules you'd actually follow.
 
 #### Step 7 — Build the portfolio
-Take the **top {c.max_positions} BUY signals** by rank (your max positions). Because each risks
-~£{risk_gbp:,.0f}, total risk ("heat") stays near **{c.max_positions*c.risk_per_trade*100:.0f}%**, under your
-**{c.max_portfolio_heat*100:.0f}%** cap.
+Fill up to **{c.max_positions} positions** from the BUY signals by rank, subject to three guards:
+- **Sector cap** — at most **{c.max_per_sector} per sector**.
+- **Correlation cap** — skip a pick moving ≥ **{c.max_position_correlation:.0%}** in lockstep with one already
+  held, so your slots aren't secretly one macro bet (real diversification, not just different tickers).
+- **Heat ceiling** — total £-at-risk stays under **{c.max_portfolio_heat*100:.0f}%** of capital.
+
+Sizes are **edge-weighted**: higher-confidence setups get closer to full size, the lowest-confidence
+ones as little as **{c.edge_size_floor:.0%}** — putting more capital where the edge is stronger.
 """
     )
 
@@ -808,8 +843,10 @@ Say a stock triggers a 🟢 BUY at **entry $100**, with an **ATR of $4** and the
 Before trusting a BUY, the app now checks the *weather*, not just the individual stock:
 
 **Layer A — market-regime gate.** It reads free public gauges — the **S&P 500** and
-**Nasdaq-100** trends, the **VIX** (fear gauge), the **semiconductor ETF (SMH)**, and the
-**US 10-year yield** — and scores them into one of three regimes:
+**Nasdaq-100** trends, the **VIX** (fear gauge), the **semiconductor ETF (SMH)**, the **US 10-year
+yield**, **high-yield credit (HYG)** (credit tends to crack before equities), and **market breadth**
+(how much of the universe is actually in an uptrend, not just the megacaps) — and scores them into
+one of three regimes:
 - 🟢 **RISK-ON** → BUYs at full size.
 - 🟡 **CAUTION** → BUYs allowed but **sized down to 50%**.
 - 🔴 **RISK-OFF** → **new BUYs paused** (they become HOLD). High beta is dangerous in a falling market.
@@ -839,6 +876,9 @@ compiled in the **📰 Macro & News tab**, which you can **refresh on demand** o
 - **Implied vs realized volatility** — when at-the-money options price a move **≥ {c.iv_rich_ratio:.1f}×**
   the stock's recent realized move, the market is bracing for something (often earnings). Buying
   into rich IV is how you can be right on direction yet lose on the vol crush — so it's flagged.
+- **Analyst revisions** — net recent upgrades minus downgrades (revision momentum is one of the
+  more robust short-horizon drivers); flagged when analysts are clearly moving one way. *(Free
+  best-effort via Yahoo; a paid estimate-revisions feed would sharpen it.)*
 
 These are **informational** — they flag a name and inform sizing, but don't by themselves block a BUY.
 

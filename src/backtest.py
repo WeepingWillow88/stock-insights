@@ -47,7 +47,7 @@ def _load_prices(cfg, reuse_cache=True):
             == str(cfg.backtest_years))
     if same:
         return db.read_df("SELECT * FROM backtest_prices", cfg.db_path)
-    tickers = universe.get_universe()
+    tickers = universe.get_universe(cfg.universe_scope)
     if cfg.benchmark not in tickers:
         tickers = [cfg.benchmark] + tickers
     prices = data.download_prices(tickers, period=cfg.backtest_years, batch_size=cfg.batch_size)
@@ -158,7 +158,8 @@ def _simulate(prep, spy_up, spy_mom3, dates, cfg, stop_mult=None):
             if outcome is None:
                 exit_i = min(i + max_hold, n - 1)
                 exit_price, reason = c[exit_i], "time"
-            net = (exit_price / entry - 1) - cost
+            trade_cost = cost + cfg.backtest_spread_atr_coef * (atr0 / entry)  # realistic, vol-scaled
+            net = (exit_price / entry - 1) - trade_cost
             r_mult = net / (stop_dist0 / entry) if stop_dist0 > 0 else 0.0
             trades.append({
                 "ticker": d["ticker"], "entry_date": dates[i], "exit_date": dates[exit_i],
@@ -230,6 +231,38 @@ def _montecarlo(tdf, cfg):
     }
 
 
+def _oos_split(tdf):
+    """Time-ordered out-of-sample check: does the edge that held in the earlier ~70% of history
+    still hold in the most recent ~30% it never 'saw'? (The rules aren't fit to data, so this is
+    a stability check rather than a parameter walk-forward — but it's the honest question.)"""
+    if tdf.empty or len(tdf) < 40:
+        return {}
+    t = tdf.sort_values("entry_date")
+    cut = int(len(t) * 0.7)
+    earlier, recent = t.iloc[:cut], t.iloc[cut:]
+    return {
+        "oos_split_date": str(recent["entry_date"].iloc[0]) if len(recent) else None,
+        "oos_earlier_exp_r": round(float(earlier["r_multiple"].mean()), 3) if len(earlier) else None,
+        "oos_recent_exp_r": round(float(recent["r_multiple"].mean()), 3) if len(recent) else None,
+        "oos_recent_trades": int(len(recent)),
+    }
+
+
+def _by_year(tdf):
+    """Per-calendar-year expectancy + win rate — shows whether the edge is steady or lumpy."""
+    if tdf.empty:
+        return pd.DataFrame(columns=["year", "trades", "expectancy_r", "win_rate"])
+    t = tdf.copy()
+    t["year"] = t["entry_date"].astype(str).str[:4]
+    rows = []
+    for yr, grp in t.groupby("year"):
+        r = grp["r_multiple"]
+        rows.append({"year": yr, "trades": int(len(grp)),
+                     "expectancy_r": round(float(r.mean()), 3),
+                     "win_rate": round(float((r > 0).mean() * 100), 1)})
+    return pd.DataFrame(rows)
+
+
 def run_backtest(cfg=CONFIG, reuse_cache=True):
     prices = _load_prices(cfg, reuse_cache)
     if prices.empty:
@@ -239,6 +272,7 @@ def run_backtest(cfg=CONFIG, reuse_cache=True):
     tdf = _simulate(prep, spy_up, spy_mom3, dates, cfg)
     summary = _summarise(tdf, cfg)
     summary.update(_montecarlo(tdf, cfg))
+    summary.update(_oos_split(tdf))
     summary["generated"] = dt.datetime.now().isoformat(timespec="seconds")
 
     if not tdf.empty:
@@ -257,6 +291,7 @@ def run_backtest(cfg=CONFIG, reuse_cache=True):
                      "expectancy_r": s.get("expectancy_r"), "win_rate": s.get("win_rate"),
                      "profit_factor": s.get("profit_factor")})
     db.write_df(pd.DataFrame(sens), "backtest_sensitivity", cfg.db_path)
+    db.write_df(_by_year(tdf), "backtest_by_year", cfg.db_path)
     return summary
 
 

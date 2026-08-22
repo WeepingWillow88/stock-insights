@@ -26,7 +26,7 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
     if db.bootstrap_working_db(cfg.db_path):
         print("      seeded working DB from snapshot (carrying the ledger forward).")
     print("[1/6] Building universe...")
-    tickers = universe.get_universe()
+    tickers = universe.get_universe(cfg.universe_scope)
     if cfg.max_tickers:
         tickers = tickers[:cfg.max_tickers]
     if cfg.benchmark not in tickers:
@@ -58,7 +58,7 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
     fx_rate = data.get_fx_rate(cfg.fx_pair, cfg.fx_fallback)
     macro_prices = data.download_prices(regime.MACRO_TICKERS, period=cfg.history_period,
                                         batch_size=cfg.batch_size)
-    reg = regime.compute_regime(macro_prices)
+    reg = regime.compute_regime(macro_prices, prices)
     macro_events = events.upcoming_macro_events(within_days=cfg.macro_event_window)
     print(f"      regime={reg['label']} (score {reg['score']}); "
           f"{len(macro_events)} macro event(s) within {cfg.macro_event_window}d.")
@@ -161,7 +161,7 @@ def refresh_macro_news(cfg=CONFIG):
     fx_rate = data.get_fx_rate(cfg.fx_pair, cfg.fx_fallback)
     macro_prices = data.download_prices(regime.MACRO_TICKERS, period=cfg.history_period,
                                         batch_size=cfg.batch_size)
-    reg = regime.compute_regime(macro_prices)
+    reg = regime.compute_regime(macro_prices, prices)
     macro_events = events.upcoming_macro_events(within_days=cfg.macro_event_window)
     earnings = events.earnings_dates(shortlist["ticker"].tolist(),
                                      within_days=cfg.earnings_lookahead_days)

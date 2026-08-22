@@ -53,9 +53,32 @@ def get_sectors():
         return {}
 
 
-def get_universe():
+_SP_PAGES = {
+    400: "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",  # mid caps
+    600: "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",  # small caps
+}
+
+
+def _sp_tickers(url):
+    resp = requests.get(url, headers=_HEADERS, timeout=20)
+    resp.raise_for_status()
+    for tbl in pd.read_html(io.StringIO(resp.text)):
+        if "Symbol" in tbl.columns:
+            return tbl["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
+    return []
+
+
+def get_universe(scope="sp500"):
+    """Tradable universe. scope="sp500" (default) or "sp1500" (adds S&P 400 mid + 600 small caps —
+    more high-beta candidates; the liquidity filters still prune the illiquid ones later)."""
     try:
         tickers = get_sp500_tickers()
+        if scope == "sp1500":
+            for sz, url in _SP_PAGES.items():
+                try:
+                    tickers += _sp_tickers(url)
+                except Exception as e:  # noqa: BLE001 - keep S&P 500 if a widen page fails
+                    print(f"[universe] S&P {sz} fetch failed ({e}); continuing without it.")
         if len(tickers) < 50:
             raise ValueError("suspiciously few tickers returned")
         return sorted(set(tickers))

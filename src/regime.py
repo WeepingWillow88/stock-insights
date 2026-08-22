@@ -12,8 +12,9 @@ All data is free via yfinance.
 import pandas as pd
 
 # ^VIX = volatility/fear gauge, ^TNX = US 10-year yield index,
-# SPY = S&P 500, QQQ = Nasdaq-100, SMH = semiconductors (your shortlist skews here)
-MACRO_TICKERS = ["^VIX", "^TNX", "SPY", "QQQ", "SMH"]
+# SPY = S&P 500, QQQ = Nasdaq-100, SMH = semiconductors (your shortlist skews here),
+# HYG = high-yield corporate bonds (a credit-spread proxy — sells off before equities in a scare).
+MACRO_TICKERS = ["^VIX", "^TNX", "SPY", "QQQ", "SMH", "HYG"]
 
 
 def _series(prices, ticker):
@@ -26,13 +27,35 @@ def _norm_yield(raw):
     return raw / 10.0 if raw > 20 else raw
 
 
-def compute_regime(prices):
+def _breadth(universe_prices, ma=50):
+    """Fraction of the tradable universe trading above its `ma`-day average — market breadth.
+    Returns None if there aren't enough names/bars. Broad participation is a healthier tape than
+    a handful of megacaps carrying the index."""
+    if universe_prices is None or getattr(universe_prices, "empty", True):
+        return None
+    try:
+        piv = universe_prices.pivot_table(index="date", columns="ticker",
+                                          values="adj_close").sort_index()
+    except Exception:  # noqa: BLE001
+        return None
+    if len(piv) < ma:
+        return None
+    last, sma = piv.iloc[-1], piv.tail(ma).mean()
+    valid = last.notna() & sma.notna()
+    n = int(valid.sum())
+    if n == 0:
+        return None
+    return float((last[valid] > sma[valid]).sum()) / n
+
+
+def compute_regime(prices, universe_prices=None):
     score = 0
     notes = []
     readings = {"vix": None, "spy_vs_50d": None, "us10y": None}
 
     spy, qqq, smh = _series(prices, "SPY"), _series(prices, "QQQ"), _series(prices, "SMH")
     vix, tnx = _series(prices, "^VIX"), _series(prices, "^TNX")
+    hyg = _series(prices, "HYG")
 
     if len(spy) >= 200:
         price, s50, s200 = spy.iloc[-1], spy.tail(50).mean(), spy.tail(200).mean()
@@ -73,7 +96,24 @@ def compute_regime(prices):
             score -= 1
             notes.append(f"10-year yield rising fast ({y_prev:.2f}%->{y_now:.2f}%) — pressures high beta (-1)")
 
-    if score >= 3:
+    # Credit: high-yield bonds tend to crack before equities in a real scare.
+    if len(hyg) >= 50:
+        if hyg.iloc[-1] > hyg.tail(50).mean():
+            score += 1; notes.append("Credit calm — high-yield bonds above their 50-day average (+1)")
+        else:
+            score -= 2; notes.append("Credit stress — high-yield bonds below their 50-day average (-2)")
+
+    # Breadth: how much of the tradable universe is actually in an uptrend (not just the megacaps).
+    breadth = _breadth(universe_prices)
+    if breadth is not None:
+        readings["breadth"] = round(breadth * 100, 0)
+        if breadth >= 0.60:
+            score += 1; notes.append(f"Broad participation — {breadth*100:.0f}% of names above their 50-day average (+1)")
+        elif breadth < 0.40:
+            score -= 1; notes.append(f"Narrow/weak breadth — only {breadth*100:.0f}% of names above their 50-day average (-1)")
+
+    # Thresholds nudged up to absorb the two extra factors (credit + breadth).
+    if score >= 4:
         label, mult = "RISK-ON", 1.0
     elif score >= 0:
         label, mult = "CAUTION", 0.5
