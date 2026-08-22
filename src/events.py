@@ -41,12 +41,17 @@ def _api_macro_events(today, within_days):
     try:
         import requests
         end = today + dt.timedelta(days=within_days)
-        url = ("https://financialmodelingprep.com/api/v3/economic_calendar"
+        # FMP "stable" API (the /api/v3 economic_calendar path is retired). The endpoint is a paid
+        # feature on FMP; on a plan without it this 402s and we fall back to the curated list.
+        url = ("https://financialmodelingprep.com/stable/economic-calendar"
                f"?from={today.isoformat()}&to={end.isoformat()}&apikey={key}")
         rows = requests.get(url, timeout=15).json()
+        if not isinstance(rows, list):
+            return None
         out, seen = [], set()
         for r in rows:
-            if str(r.get("country")) not in ("US", "United States"):
+            if str(r.get("country", "")) not in ("US", "United States") \
+                    and str(r.get("currency", "")) != "USD":
                 continue
             label = str(r.get("event", "")).strip()
             if not any(k in label.lower() for k in _MAJOR):
