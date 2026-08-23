@@ -44,6 +44,7 @@ jobs:
           # falls back to a keyword scan (FinBERT is not installed in CI to keep the run light).
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}   # optional; real econ calendar (paid FMP plan)
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}  # optional; richer stock news (free tier)
           RUN_KIND: SCHEDULED
         run: python -m src.pipeline
 

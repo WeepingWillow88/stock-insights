@@ -68,7 +68,7 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
     print(f"      {len(earnings)} names with earnings within {cfg.earnings_lookahead_days}d.")
 
     print("      Fetching news + sentiment for shortlist...")
-    news_map = news.build_news_map(shortlist["ticker"].tolist(), cfg)
+    news_map = news.build_news_map(shortlist["ticker"].tolist(), cfg, prices, reg["label"])
     src = "claude" if any(v.get("source") == "claude" for v in news_map.values()) else "keywords"
     print(f"      scored news for {len(news_map)} names (sentiment source: {src}).")
 
@@ -165,7 +165,7 @@ def refresh_macro_news(cfg=CONFIG):
     macro_events = events.upcoming_macro_events(within_days=cfg.macro_event_window)
     earnings = events.earnings_dates(shortlist["ticker"].tolist(),
                                      within_days=cfg.earnings_lookahead_days)
-    news_map = news.build_news_map(shortlist["ticker"].tolist(), cfg)
+    news_map = news.build_news_map(shortlist["ticker"].tolist(), cfg, prices, reg["label"])
     extras_map = (marketdata.build_extras_map(shortlist["ticker"].tolist(), prices, cfg)
                   if cfg.fetch_market_extras else {})
     sig = signals.build_signals(prices, shortlist, cfg, fx_rate, reg, macro_events,

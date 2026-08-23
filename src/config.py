@@ -95,8 +95,12 @@ class Config:
     use_finbert: bool = True              # use local FinBERT if installed (no key needed)
     claude_model: str = "claude-haiku-4-5"  # cheap headline classification within budget;
     #                                         swap to "claude-opus-5" for maximum quality
-    news_headlines: int = 8               # headlines pulled per ticker
+    news_headlines: int = 8               # headlines/news items pulled per ticker
+    news_lookback_days: int = 4           # how far back to pull news
     news_avoid_downgrades_buy: bool = True  # a strongly negative news read turns BUY -> HOLD
+    # News source: Finnhub company-news (headline + summary + source, reliable ticker tagging) when
+    # FINNHUB_API_KEY is set; otherwise falls back to Google News RSS titles. Claude also gets the
+    # stock's recent price move + the market regime as context, so it reads the *reaction*.
 
     # --- Options-implied vol + short-interest overlays (B2 / B3, best-effort via yfinance) ---
     fetch_market_extras: bool = True      # pull IV + short interest for the shortlist each run
