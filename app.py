@@ -53,6 +53,39 @@ def load_table(table):
 SIG_EMOJI = {"BUY": "🟢 BUY", "SELL": "🔴 SELL", "HOLD": "🟡 HOLD"}
 
 
+def _short_date(s):
+    """'2026-08-19' -> 'Aug 19'; fall back to the raw string if it won't parse."""
+    try:
+        return pd.to_datetime(str(s)).strftime("%b %-d")
+    except Exception:
+        return str(s)
+
+
+def _ledger_labels(ledger_df, tickers):
+    """Map each ticker to a one-line summary of its history in the track-record ledger.
+
+    Open positions win (you're holding it now); otherwise show the most recent close.
+    Returns a list aligned to `tickers` ('' when the ticker has never been logged)."""
+    if ledger_df is None or ledger_df.empty or "ticker" not in ledger_df.columns:
+        return ["" for _ in tickers]
+    labels = {}
+    for tkr, grp in ledger_df.groupby("ticker"):
+        openp = grp[grp["status"] == "open"]
+        closed = grp[grp["status"] == "closed"]
+        if not openp.empty:
+            since = _short_date(openp.sort_values("record_date").iloc[-1]["record_date"])
+            labels[tkr] = f"🟡 Holding since {since}"
+        elif not closed.empty:
+            last = closed.sort_values("exit_date").iloc[-1]
+            r = float(last["r_multiple"]) if pd.notna(last["r_multiple"]) else 0.0
+            won = str(last.get("outcome", "")).lower() == "win"
+            tag = f"{'🟢 Won' if won else '🔴 Lost'} {r:+.2f}R · {_short_date(last['exit_date'])}"
+            if len(closed) > 1:
+                tag += f" · {len(closed)} trades"
+            labels[tkr] = tag
+    return [labels.get(t, "") for t in tickers]
+
+
 def freshness(iso):
     """Return (pretty datetime, 'x ago', is_stale) for an ISO timestamp string."""
     if not iso or pd.isna(iso):
@@ -285,12 +318,26 @@ with tab_sig:
                                default=["BUY", "HOLD", "SELL"])
         view = sig[sig["signal"].isin(types)].copy()
         view["signal"] = view["signal"].map(SIG_EMOJI).fillna(view["signal"])
+
+        # ---- Track-record link: today's signal is a fresh call; the ledger is the honest
+        # history of past calls. They intentionally differ (a BUY can be logged, closed as a
+        # win, and rate HOLD again days later). Surface any ledger trade so the two tabs
+        # don't look contradictory. Open positions take precedence, else the latest close.
+        view["ledger"] = _ledger_labels(ledger_df, view["ticker"])
+        money_cfg["ledger"] = st.column_config.TextColumn("Track record",
+                 help="This ticker's history in the 📈 Track record ledger. 'Holding' = an open "
+                      "logged position; 'Won/Lost …R' = the most recent closed trade. Blank means "
+                      "the app has never logged a trade here. It reflects *past* calls, so it can "
+                      "differ from today's fresh signal on the left.")
+
         acols = ["rank", "ticker", "signal", "conviction", "beta", "price", "stop",
-                 "target", "shares", "pos_value_usd", "risk_gbp", "news", "flags", "reason"]
+                 "target", "shares", "pos_value_usd", "risk_gbp", "news", "ledger", "flags", "reason"]
         acols = [c for c in acols if c in view.columns]
         st.dataframe(view[acols], width="stretch", hide_index=True, column_config=money_cfg)
         st.caption("Sizing (shares/stop/target/risk) is shown for BUY signals only. "
-                   "Stop = entry − 2×ATR · Target = 2:1 reward:risk · Risk £ kept ≤ £750.")
+                   "Stop = entry − 2×ATR · Target = 2:1 reward:risk · Risk £ kept ≤ £750. "
+                   "**Track record** links each row to the ledger of past calls (📈 tab) — it can "
+                   "differ from today's signal because that's a *fresh* call, not the logged trade.")
 
 # =================== SCREENER TAB ===================
 with tab_screen:
