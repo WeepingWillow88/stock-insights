@@ -123,7 +123,8 @@ rules, the sizing maths, and how the daily refresh works.
   profit target, £ at risk, and a **Confidence %**.
 - **📰 Macro & News** — the market mood, scheduled market-moving events, and per-stock news you
   can expand. The two refresh buttons live here.
-- **📈 Track record** — a **live scorecard** of the app's own past calls, plus a **backtest** and
+- **📈 Track record** — **your open positions with today's action** (live trailing-stop level +
+  a HOLD/SELL-today call), a **live scorecard** of closed calls with £ P&L, plus a **backtest** and
   the **circuit-breaker** warning.
 - **📊 Screener** — the raw ranked candidate list plus a price chart for any name.
 - **🧠 How it works** — the full method, the freshness/refresh explainer, and the settings.
@@ -630,10 +631,45 @@ with tab_track:
 
     if not ledger_df.empty:
         opn = ledger_df[ledger_df["status"] == "open"]
-        st.metric("Currently tracking (open)", int(len(opn)))
-        if not opn.empty:
-            st.dataframe(opn[["ticker", "record_date", "entry", "stop", "target", "risk_gbp"]],
-                         width="stretch", hide_index=True)
+        st.markdown(f"### 📌 Your open positions — today's action ({len(opn)} held)")
+        if opn.empty:
+            st.caption("No open positions right now.")
+        else:
+            ov = _ledger.open_positions_view(load_table("prices"), CONFIG)
+            if ov.empty:
+                st.dataframe(opn[["ticker", "record_date", "entry", "stop", "target", "risk_gbp"]],
+                             width="stretch", hide_index=True)
+            else:
+                _sell = ov[ov["action"] == "SELL"]
+                if not _sell.empty:
+                    st.warning("🔴 **Consider selling today:** " + " · ".join(
+                        f"**{r.ticker}** ({r.reason})" for r in _sell.itertuples()))
+                _asof = ov["as_of"].iloc[0] if "as_of" in ov.columns else "?"
+                st.caption(f"Unrealised **£{float(ov['pnl_gbp'].sum()):,.0f}** across {len(ov)} open · "
+                           f"prices as of {_asof}. Keep the **trailing stop** as a stop-loss order at "
+                           "your broker — the app only checks at the scheduled refreshes, so the broker "
+                           "order is what protects you intraday.")
+                ovcols = [c for c in ["ticker", "shares", "days_held", "entry", "current",
+                                      "trail_stop", "target", "unrealised_r", "pnl_gbp", "action"]
+                          if c in ov.columns]
+                st.dataframe(ov[ovcols], width="stretch", hide_index=True, column_config={
+                    "ticker": st.column_config.TextColumn("Ticker"),
+                    "shares": st.column_config.NumberColumn("Shares", format="%d"),
+                    "days_held": st.column_config.NumberColumn("Days held", format="%d"),
+                    "entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
+                    "current": st.column_config.NumberColumn("Now", format="$%.2f",
+                        help="Latest close in the data (see the 'as of' date) — re-check the live price."),
+                    "trail_stop": st.column_config.NumberColumn("Trailing stop", format="$%.2f",
+                        help="Sell if it trades here. Ratchets up as the stock rises; never below the "
+                             "initial stop. Place this as a stop-loss order at your broker."),
+                    "target": st.column_config.NumberColumn("Target", format="$%.2f",
+                        help="Reference profit target (the trailing stop usually manages the exit)."),
+                    "unrealised_r": st.column_config.NumberColumn("Unreal. R", format="%+.2f"),
+                    "pnl_gbp": st.column_config.NumberColumn("Unreal. £", format="£%d",
+                        help="Unrealised profit/loss so far on the recommended shares."),
+                    "action": st.column_config.TextColumn("Today",
+                        help="HOLD = keep it; SELL = a trailing-stop / trend-break / time exit has triggered."),
+                })
         cl = ledger_df[ledger_df["status"] == "closed"].copy()
         if not cl.empty:
             # Actual £ P&L on the recommended share count = R × the £ risked (net of modelled costs).

@@ -104,6 +104,50 @@ def update_open_positions(prices, cfg):
     return changed
 
 
+def open_positions_view(prices, cfg):
+    """Read-only 'what do I do today' view of every OPEN position (does NOT close anything).
+
+    For each holding, using the same trailing-stop + trend-break model as update_open_positions,
+    returns: latest price, the live **trailing stop** (the level to keep at your broker), the
+    trend average, days held, unrealised R + £, and a HOLD / SELL-today action with the reason."""
+    led = _load(cfg)
+    openp = led[led["status"] == "open"] if not led.empty else led
+    rows = []
+    for _, row in openp.iterrows():
+        p = prices[prices["ticker"] == row["ticker"]].sort_values("date")
+        if p.empty:
+            continue
+        closes = p["close"].astype(float)
+        entry, stop = float(row["entry"]), float(row["stop"])
+        atr0 = (entry - stop) / cfg.atr_stop_mult if cfg.atr_stop_mult else (entry - stop)
+        bars = p[p["date"] > str(row["record_date"])]
+        held = int(len(bars))
+        hh = max(entry, float(bars["close"].astype(float).max())) if not bars.empty else entry
+        current = float(closes.iloc[-1])
+        trail = max(stop, hh - cfg.trail_atr_mult * atr0)  # live trailing stop (never below initial)
+        sma = closes.rolling(cfg.trend_exit_sma).mean().iloc[-1]
+        trend_ok = not pd.notna(sma) or current >= float(sma)
+        action, reason = "HOLD", "trend intact, above the trailing stop"
+        if current <= trail:
+            action, reason = "SELL", "at/through the trailing stop"
+        elif pd.notna(sma) and current < float(sma):
+            action, reason = "SELL", f"closed below its {cfg.trend_exit_sma}-day average (trend break)"
+        elif held >= cfg.ledger_max_hold_days:
+            action, reason = "SELL", f"held {held} days (time limit)"
+        stop_dist = entry - stop
+        unreal_r = (current - entry) / stop_dist if stop_dist > 0 else 0.0
+        rows.append({
+            "ticker": row["ticker"], "shares": row.get("shares"),
+            "record_date": row["record_date"], "days_held": held,
+            "entry": round(entry, 2), "current": round(current, 2),
+            "trail_stop": round(trail, 2), "target": row.get("target"),
+            "unrealised_r": round(unreal_r, 2),
+            "pnl_gbp": round(unreal_r * float(row.get("risk_gbp") or 0), 0),
+            "action": action, "reason": reason, "as_of": str(p["date"].iloc[-1]),
+        })
+    return pd.DataFrame(rows)
+
+
 def stats(cfg):
     led = _load(cfg)
     closed = led[led["status"] == "closed"] if not led.empty else led
