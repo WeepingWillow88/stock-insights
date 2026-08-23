@@ -85,6 +85,128 @@ Even a perfect setup gets held back or shrunk if:
 
 ---
 
+## How Much Each Filter Counts (Weightings)
+
+A common question: *"what's the weight of each filter?"* The honest answer is that the
+system is **mostly a pass/fail checklist, not a weighted average.** Explicit weights
+exist in only two places; everything else is a gate that must be cleared.
+
+### Weighted place #1 — The ranking score
+Decides *which* stocks make the 75-name shortlist and in what order. News plays **no
+role** here.
+
+| Ingredient | Weight |
+| --- | --- |
+| Beta (how jumpy the stock is) | **60%** |
+| 3-month momentum (recent gain) | **40%** |
+| Uptrend bonus | +0.5 (flat) |
+
+### Weighted place #2 — The conviction score
+Five independent health checks, each worth exactly **20%**. A stock needs **≥ 75%**
+(i.e. **4 of 5**) to be eligible to buy.
+
+| Check | Weight |
+| --- | --- |
+| Trend (price > 50-day avg, and 50-day > 200-day) | 20% |
+| Medium-term momentum (3-month gain > 0) | 20% |
+| Short-term momentum (1-month gain > 0) | 20% |
+| Healthy RSI (between 45 and 70) | 20% |
+| **News is not negative** | 20% |
+
+> ⚠️ **Note on news:** it can only ever *subtract* — positive news doesn't add points.
+> And because 75% = 4 of 5 checks, negative news alone doesn't block a buy; it just
+> **removes your margin for error** on the technicals.
+
+### Everything else — hard gates (no weight, just pass/fail)
+Failing **any single one** of these blocks the buy entirely — so they behave like
+"infinite weight":
+
+- Price above 50-day average · 50-day above 200-day
+- Positive momentum · RSI in 45–70
+- Beats the S&P over 3 months (relative strength)
+- Above-average trading volume
+- Conviction ≥ 75%
+- No earnings within 3 days
+- Market regime not "risk-off"
+
+---
+
+## Worked Example — One Stock Through the Funnel
+
+Let's walk **NVIDIA (NVDA)** — a genuinely high-beta chip stock — through the whole
+process.
+
+> 📌 The figures below are an **illustrative snapshot to show the mechanics** — they are
+> *not* live market data or a recommendation.
+
+**The raw numbers on the day (illustrative):**
+
+| Metric | Value |
+| --- | --- |
+| Price | $170 |
+| Beta | 1.6 (jumpy — qualifies) |
+| ATR (typical daily swing) | $5 |
+| 50-day avg | $150 · 200-day avg | $130 |
+| RSI | 58 |
+| 3-month gain | +18% (S&P did +6%) |
+| Today's volume | above its 20-day average |
+
+**Step 1 — Shortlist ranking:** high beta + strong momentum + uptrend bonus → lands
+high on the 75-name shortlist. ✅
+
+**Step 2 — Base signal:** price ($170) > 50-day ($150) > 200-day ($130), momentum
+positive, RSI 58 sits in the healthy 45–70 band → **BUY candidate.** ✅
+
+**Step 3 — Conviction score:**
+
+| Check | Result | Points |
+| --- | --- | --- |
+| Trend | ✅ | 20% |
+| 3-month momentum | ✅ | 20% |
+| 1-month momentum | ✅ | 20% |
+| Healthy RSI (58) | ✅ | 20% |
+| News not negative *(neutral)* | ✅ | 20% |
+| **Total** | | **100%** |
+
+**Step 4 — Quality gates:** beats the S&P (+18% vs +6%) ✅ · volume above average ✅ ·
+conviction 100% ≥ 75% ✅ → **survives as a BUY.**
+
+**Step 5 — Overlays:** no earnings within 3 days ✅ · market regime "risk-on" ✅ · news
+neutral ✅ → **BUY confirmed.**
+
+**Position sizing** (£50,000 pot, ~1.27 £→$):
+
+- Stop-loss = 2 × ATR below entry = $170 − $10 = **$160**
+- Target = 2 × risk above entry = $170 + $20 = **$190** (2:1 reward-to-risk)
+- *Risk-based limit:* £750 max loss ÷ $10 stop distance ≈ **95 shares**
+- *Capital-slot limit:* (1/8 of pot) ÷ $170 ≈ **46 shares**
+- **Buy the smaller → 46 shares** (position is *capital-bound*), ≈ $7,820,
+  risking ≈ **£360** if the stop hits.
+
+### Now change one thing: the news turns negative
+
+Say the keyword scanner flags NVDA's headlines as **negative** (e.g. it counted words
+like *"probe", "cut", "weak"*). Two things happen:
+
+1. **Conviction drops to 80%** (4 of 5 checks) — still above the 75% bar, so NVDA can
+   *still* be bought. News alone didn't kill it.
+2. **But the position gets shrunk.** The engine's "edge-weighted sizing" scales size by
+   how far conviction clears the 75% floor:
+   - At 100% conviction → full size (46 shares)
+   - At 80% conviction → **~60% size (≈ 27 shares)** — smaller bet on a shakier setup.
+
+And if the news were **strongly** negative (an "avoid" signal — sentiment very negative
+across several headlines), the BUY would be **downgraded to HOLD outright**, no matter
+how good the technicals looked.
+
+> 💡 **This is exactly where the keyword-vs-Claude gap bites.** Today's keyword scanner
+> can misread a headline like *"recession fears ease"* as negative, needlessly shrinking
+> or skipping a good trade — or miss a genuinely bad story it has no words for. Until
+> Claude is wired in, treat the news layer as a **faint, occasionally-wrong nudge**, and
+> assume the decision is really being driven by the price/trend/momentum technicals.
+
+---
+
 ## How Much It Buys — and How It Protects the Money
 
 This is arguably the best-designed part of the whole system.
