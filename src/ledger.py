@@ -14,6 +14,10 @@ from . import db
 
 COLUMNS = ["ticker", "record_date", "entry", "stop", "target", "shares", "risk_gbp",
            "status", "exit_date", "exit_price", "r_multiple", "outcome"]
+# Columns that must stay numeric — pandas 3.0 reads text-ish SQLite columns as a strict `str`
+# dtype, and later assigning a float into one (e.g. a fresh exit_price) raises TypeError. Coercing
+# on load keeps them float so the read-modify-write in update_open_positions is safe on any pandas.
+_NUMERIC_COLS = ["entry", "stop", "target", "shares", "risk_gbp", "exit_price", "r_multiple"]
 
 
 def _load(cfg):
@@ -22,6 +26,8 @@ def _load(cfg):
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = None
+        for col in _NUMERIC_COLS:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
     return pd.DataFrame(columns=COLUMNS)
 
