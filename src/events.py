@@ -83,14 +83,51 @@ def upcoming_macro_events(today=None, within_days=10):
     return sorted(out, key=lambda x: x["days_until"])
 
 
+def _fmp_earnings_map(today, within_days):
+    """Upcoming earnings dates from FMP's earnings-calendar (one call for the whole window) as
+    {symbol: iso_date}. Returns {} without a key or on any failure. NOTE: FMP's *free* tier caps
+    this to a sampled subset and ignores the symbol filter, so it's used only to SUPPLEMENT the
+    per-ticker yfinance lookup below (prefer FMP where present, fall back to yfinance)."""
+    key = os.environ.get("FMP_API_KEY")
+    if not key:
+        return {}
+    try:
+        import requests
+        end = today + dt.timedelta(days=within_days)
+        url = ("https://financialmodelingprep.com/stable/earnings-calendar"
+               f"?from={today.isoformat()}&to={end.isoformat()}&apikey={key}")
+        rows = requests.get(url, timeout=15).json()
+        if not isinstance(rows, list):
+            return {}
+        out = {}
+        for r in rows:
+            sym, d = str(r.get("symbol", "")).strip(), str(r.get("date", ""))[:10]
+            if not sym or not d:
+                continue
+            try:
+                if 0 <= (dt.date.fromisoformat(d) - today).days <= within_days:
+                    out.setdefault(sym, d)  # keep the earliest (rows are date-ascending)
+            except ValueError:
+                continue
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def earnings_dates(tickers, within_days=14, today=None):
-    """Best-effort next earnings date per ticker. Returns {ticker: {date, days_until}}.
-    Silently skips tickers that error out (yfinance calendar is not 100% reliable)."""
+    """Best-effort next earnings date per ticker. Returns {ticker: {date, days_until, source}}.
+    Prefers FMP's calendar where it has the name (one call, includes estimates), and falls back to
+    the per-ticker yfinance calendar otherwise. Silently skips tickers that error out."""
     import yfinance as yf
 
     today = today or dt.date.today()
+    fmp = _fmp_earnings_map(today, within_days)
     out = {}
     for t in tickers:
+        if t in fmp:  # FMP already has a date in-window — no per-ticker call needed
+            out[t] = {"date": fmp[t], "days_until": (dt.date.fromisoformat(fmp[t]) - today).days,
+                      "source": "fmp"}
+            continue
         try:
             cal = yf.Ticker(t).calendar
             ed = None
@@ -102,7 +139,7 @@ def earnings_dates(tickers, within_days=14, today=None):
             edd = ed if isinstance(ed, dt.date) else dt.date.fromisoformat(str(ed)[:10])
             days = (edd - today).days
             if 0 <= days <= within_days:
-                out[t] = {"date": edd.isoformat(), "days_until": days}
+                out[t] = {"date": edd.isoformat(), "days_until": days, "source": "yfinance"}
         except Exception:
             continue
     return out

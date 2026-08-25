@@ -31,6 +31,21 @@ _POS = ["beat", "beats", "record", "surge", "surges", "upgrade", "raise", "raise
         "jump", "jumps", "expand", "approval", "approved", "wins", "strong", "rally",
         "breakthrough", "partnership", "gains", "rises", "rose", "outperform", "tops"]
 
+# Finnhub's free company-news feed tags a lot of generic, market-wide screener/aggregator
+# content to individual symbols (a stock merely appears in a "most active S&P 500" listicle).
+# That's noise for a per-stock sentiment read, so we drop it and keep the company-specific items.
+_NOISE_SOURCES = ("chartmill", "valueengine", "marketbeat", "simply wall")
+_NOISE_HEADLINE = ("s&p500", "s&p 500", "most active", "top movers", "gap up", "gap down",
+                   "trading volume", "today's session", "market summary", "stocks to watch",
+                   "biggest movers", "premarket", "market wrap", "week in review")
+
+
+def _is_market_noise(headline, source):
+    h, s = headline.lower(), source.lower()
+    if any(n in s for n in _NOISE_SOURCES):
+        return True
+    return any(n in h for n in _NOISE_HEADLINE)
+
 
 def _google_rss(ticker, limit, days):
     """Recent headline TITLES for a ticker via Google News RSS (free, no key). Titles only."""
@@ -63,14 +78,18 @@ def _finnhub_news(ticker, cfg, limit):
             return None
         rows = sorted(rows, key=lambda r: r.get("datetime", 0), reverse=True)
         items = []
-        for r in rows[:limit]:
+        for r in rows:  # filter across ALL rows first, so screener noise doesn't eat the slots
             head = str(r.get("headline", "")).strip()
             if not head:
                 continue
-            summ = str(r.get("summary", "")).strip()
             src = str(r.get("source", "")).strip()
+            if _is_market_noise(head, src):
+                continue
+            summ = str(r.get("summary", "")).strip()
             txt = head + (f" — {summ}" if summ else "") + (f" [{src}]" if src else "")
             items.append(txt[:400])  # cap so one long story can't dominate the prompt
+            if len(items) >= limit:
+                break
         return items or None
     except Exception:  # noqa: BLE001
         return None
@@ -78,11 +97,13 @@ def _finnhub_news(ticker, cfg, limit):
 
 def fetch_headlines(ticker, cfg):
     """Recent news items for a ticker: Finnhub (headline + summary + source) if a key is set,
-    else Google News RSS titles. Returns a list of strings."""
+    else Google News RSS titles. Falls back to RSS when Finnhub's free feed leaves too few
+    company-specific items after the screener-noise filter. Returns a list of strings."""
     items = _finnhub_news(ticker, cfg, cfg.news_headlines)
-    if items is not None:
+    if items and len(items) >= 2:
         return items
-    return _google_rss(ticker, cfg.news_headlines, cfg.news_lookback_days)
+    rss = _google_rss(ticker, cfg.news_headlines, cfg.news_lookback_days)
+    return rss or items or []
 
 
 def _dedupe(titles):

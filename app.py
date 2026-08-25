@@ -1082,6 +1082,27 @@ refreshes your current session only — the cloud filesystem is temporary.)
 (`python -m src.shock`) scans for a big intraday move + fresh headline and alerts you.
 
 ---
+
+### Where each piece of data comes from
+
+Everything runs on **free sources by default**, and transparently upgrades when an API key is set.
+Keys live in a local `.env` (or the hosted app's GitHub Action secrets) — never in the code.
+
+| What | Source today | Upgrades to (if key set) | Verdict / what would make it better |
+|---|---|---|---|
+| **Prices** (signals, regime, backtest) | yfinance — free, unofficial | — | Accurate & fine. A paid feed (Polygon/Tiingo) only matters for *reliability* if this ever drives real money |
+| **Market backdrop / regime** | yfinance: SPY, QQQ, VIX, SMH, US 10-yr, HYG credit + breadth | — | **Strong as-is — no paid source needed.** Well-diversified multi-factor read |
+| **Per-stock news** | Google News RSS *titles* → **Finnhub** company-news (`FINNHUB_API_KEY`) — headline + summary + source, screener-noise filtered | Finnhub **free** tier | Finnhub free is enough; the app drops generic "most-active" aggregator spam and falls back to RSS if too few real items remain |
+| **News sentiment** | keyword scan → local **FinBERT** → **Claude** (`ANTHROPIC_API_KEY`, `{c.claude_model}`) | Claude (pennies/run) | **Biggest free-ish win: set `ANTHROPIC_API_KEY`.** Claude reads the *reaction* in market context; keywords can't |
+| **Macro calendar** (CPI/FOMC/jobs) | curated seeded list (`events.py`) | **FMP** economic-calendar (`FMP_API_KEY`, **paid tier only**) | **The one thing worth paying for.** Free FMP/Finnhub tiers 402 here; the seeded list works but must be kept current |
+| **Earnings dates** | **FMP** earnings-calendar (free, where it has the name) → yfinance fallback | FMP paid = full coverage | Free tier samples a subset, so it *supplements* yfinance rather than replacing it |
+| **Options IV · short interest · analyst revisions** | yfinance best-effort | — | Informational flags only; a paid options/estimate-revisions feed would sharpen them |
+
+**Bottom line:** the market backdrop is solid on free data. The single largest accuracy gain is
+adding `ANTHROPIC_API_KEY` (near-free) so news is *read*, not keyword-counted. The only source
+genuinely worth *paying* for is a real macro/econ calendar (upgrade FMP or Finnhub premium).
+
+---
 """
     )
 
