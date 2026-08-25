@@ -259,6 +259,10 @@ with tab_sig:
                      help="Don't chase above this. It's the buy price plus ¼ of the distance to your "
                           "stop — pay more and your reward-to-risk gets too thin. If the live price is "
                           "already above it, skip the trade or wait for a pullback."),
+            "status": st.column_config.TextColumn("Buyable?",
+                     help="✅ = the latest price is still within range (at or below 'Buy up to' and "
+                          "still a fresh BUY). ⚠️ = it's run past the entry or no longer rates BUY — "
+                          "the clean entry has passed, so skip it or wait for a pullback."),
             "stop": st.column_config.NumberColumn("Safety exit", format="$%.2f",
                      help="Stop-loss: if the price falls here, sell to cap your loss. "
                           "Set two average daily swings (2×ATR) below the buy price."),
@@ -317,8 +321,8 @@ with tab_sig:
         if not ledger_df.empty and {"record_date", "status"}.issubset(ledger_df.columns):
             _today_open = ledger_df[(ledger_df["record_date"].astype(str) == str(run_date))
                                     & (ledger_df["status"].isin(["open", "sell_pending"]))].copy()
-        _sig_extra = (signals_df[[c for c in ["ticker", "sector", "conviction", "beta", "flags", "reason"]
-                                  if c in signals_df.columns]]
+        _sig_extra = (signals_df[[c for c in ["ticker", "sector", "conviction", "beta", "price",
+                                  "signal", "flags", "reason"] if c in signals_df.columns]]
                       if not signals_df.empty else pd.DataFrame(columns=["ticker"]))
         new_buys = (_today_open.merge(_sig_extra, on="ticker", how="left")
                     if not _today_open.empty else _today_open)
@@ -332,14 +336,23 @@ with tab_sig:
                 new_buys["entry"].astype(float)
                 + CONFIG.max_chase_frac * (new_buys["entry"].astype(float) - new_buys["stop"].astype(float))
             ).round(2)
-            pcols = ["ticker", "sector", "conviction", "beta", "entry", "buy_up_to", "stop",
-                     "target", "shares", "risk_gbp", "flags", "reason"]
+
+            def _chase_status(r):
+                now = r.get("price")
+                if pd.notna(now) and float(now) > float(r["buy_up_to"]):
+                    return "⚠️ ran past — don't chase"
+                if r.get("signal") and str(r.get("signal")) != "BUY":
+                    return f"⚠️ now rates {r.get('signal')}"
+                return "✅ still buyable"
+            new_buys["status"] = new_buys.apply(_chase_status, axis=1)
+            pcols = ["ticker", "sector", "conviction", "beta", "entry", "buy_up_to", "price",
+                     "status", "stop", "target", "shares", "risk_gbp", "flags", "reason"]
             pcols = [c for c in pcols if c in new_buys.columns]
             st.dataframe(new_buys[pcols], width="stretch", hide_index=True, column_config=money_cfg)
-            st.caption("**Buy at** is the signal price (last close); **Buy up to** is the most it's "
-                       "worth paying today. If the live price is above **Buy up to**, the entry has "
-                       "run too far past the signal — skip it or wait for a pullback (chasing thins "
-                       "your reward-to-risk).")
+            st.caption("**Buy at** = the signal price · **Buy up to** = the most it's worth paying "
+                       "today · **Price** = latest market price · **Buyable?** = ✅ still in range, or "
+                       "⚠️ it's run past the entry / no longer a fresh BUY, so skip it or wait for a "
+                       "pullback.")
 
         # SELL these — holdings the exit rules flagged today; they close at the next session's price.
         _pending = _ledger.pending_sells_view(load_table("prices"), CONFIG)
