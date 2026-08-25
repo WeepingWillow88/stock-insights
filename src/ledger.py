@@ -7,6 +7,7 @@ On each pipeline run:
 This produces a live, honest hit rate that accrues from the day you start running it.
 """
 import datetime as dt
+import os
 
 import pandas as pd
 
@@ -33,6 +34,34 @@ def _load(cfg):
             df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
     return pd.DataFrame(columns=COLUMNS)
+
+
+def reconcile(cfg, seed_path="data/seed.db"):
+    """Make the ledger cumulative & clobber-proof: union the working ledger with the one already
+    shipped in seed.db, so a stale working copy (e.g. a local run vs the cloud-accumulated ledger)
+    can never drop closed trades. Keyed by (ticker, record_date); keeps the most-progressed status
+    (closed > sell_pending > open). No-op when the two are the same file."""
+    work = _load(cfg)
+    if not os.path.exists(seed_path) or os.path.abspath(seed_path) == os.path.abspath(cfg.db_path):
+        return work
+    try:
+        seed_led = db.read_df("SELECT * FROM ledger", seed_path)
+    except Exception:  # noqa: BLE001
+        return work
+    if seed_led is None or seed_led.empty:
+        return work
+    for col in COLUMNS:
+        if col not in seed_led.columns:
+            seed_led[col] = None
+    for col in _NUMERIC_COLS:
+        seed_led[col] = pd.to_numeric(seed_led[col], errors="coerce")
+    rank = {"closed": 3, "sell_pending": 2, "open": 1}
+    both = pd.concat([seed_led[COLUMNS], work[COLUMNS]], ignore_index=True)
+    both["_k"] = both["ticker"].astype(str) + "|" + both["record_date"].astype(str)
+    both["_r"] = both["status"].map(rank).fillna(0)
+    both = both.sort_values("_r").drop_duplicates("_k", keep="last").drop(columns=["_k", "_r"])
+    db.write_df(both, "ledger", cfg.db_path)
+    return both
 
 
 def record_recommendations(sig, cfg, today=None):

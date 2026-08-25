@@ -25,6 +25,7 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
     # start empty every run and never show a closed trade.
     if db.bootstrap_working_db(cfg.db_path):
         print("      seeded working DB from snapshot (carrying the ledger forward).")
+    ledger.reconcile(cfg)  # union with the shipped ledger so closed trades are never lost
     print("[1/6] Building universe...")
     tickers = universe.get_universe(cfg.universe_scope)
     if cfg.max_tickers:
