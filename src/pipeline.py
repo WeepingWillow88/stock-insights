@@ -93,8 +93,8 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
     _persist_signals_bundle(sig, reg_row, events_df, news_df, cfg)
 
     opened = ledger.record_recommendations(sig, cfg, run_date)
-    closed = ledger.update_open_positions(prices, cfg)
-    print(f"      ledger: +{opened} new positions logged, {closed} closed.")
+    changed = ledger.update_open_positions(prices, cfg)
+    print(f"      ledger: +{opened} new positions logged, {changed} exit(s) flagged/closed.")
 
     run_kind = os.environ.get("RUN_KIND", "BOD")
     if send_digest:

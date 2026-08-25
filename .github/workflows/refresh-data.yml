@@ -5,12 +5,17 @@ name: Refresh market data
 # repo triggers a Streamlit Community Cloud redeploy, so the live app picks up fresh prices with
 # no manual step.
 #
-# Schedule is in UTC. US market is 09:30–16:00 ET (UTC-4 in summer / UTC-5 in winter), so these
-# fire roughly "before the open" and "after the close" during EDT; they drift ~1h in EST.
+# Schedule is in UTC (GitHub cron ignores DST). US market is 09:30–16:00 ET. We want two runs:
+#   • pre-open   — morning, before the 09:30 ET open
+#   • pre-close  — ~15 min before the 16:00 ET close
+# ET is UTC-4 (summer/EDT) or UTC-5 (winter/EST), so the pre-close run has one cron per season;
+# the "gate" step below runs only the one that lands in the ~15-min-before-close window and skips
+# the other, so it stays correct year-round without double runs.
 on:
   schedule:
-    - cron: "45 12 * * 1-5"   # ~08:45 ET — before the US open (weekdays)
-    - cron: "15 20 * * 1-5"   # ~16:15 ET — after the US close (weekdays)
+    - cron: "45 12 * * 1-5"   # ~08:45 ET (EDT) / 07:45 ET (EST) — before the open (gate passes it)
+    - cron: "42 19 * * 1-5"   # 15:42 ET during EDT (summer) — ~15 min before the close
+    - cron: "42 20 * * 1-5"   # 15:42 ET during EST (winter) — ~15 min before the close
   workflow_dispatch:           # allow manual "Run workflow" from the Actions tab
 
 # Never let two refreshes run at once (they both push seed.db).
@@ -35,23 +40,51 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      - name: Decide whether to run + label it (DST-aware, ~15 min before the NYSE close)
+        id: gate
+        run: |
+          python3 - <<'PY'
+          import os, datetime
+          from zoneinfo import ZoneInfo
+          now = datetime.datetime.now(ZoneInfo("America/New_York"))
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          run, kind = "yes", "manual"
+          if event == "schedule":
+              if now.hour < 12:                     # the morning cron
+                  kind = "pre-open"
+              else:                                  # an afternoon cron — only the right season's fires
+                  close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+                  mins = (close - now).total_seconds() / 60
+                  if 2 <= mins <= 45:
+                      kind = "pre-close"
+                  else:
+                      run = "no"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"run={run}\nkind={kind}\n")
+          print(f"event={event} ET={now:%Y-%m-%d %H:%M} -> run={run} kind={kind}")
+          PY
+
       - name: Install dependencies
+        if: steps.gate.outputs.run == 'yes'
         run: pip install -r requirements.txt
 
       - name: Run full pipeline (download prices + rebuild everything)
+        if: steps.gate.outputs.run == 'yes'
         env:
           # Optional: set this repo secret to score news with Claude; without it the pipeline
           # falls back to a keyword scan (FinBERT is not installed in CI to keep the run light).
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}   # optional; real econ calendar (paid FMP plan)
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}  # optional; richer stock news (free tier)
-          RUN_KIND: SCHEDULED
+          RUN_KIND: ${{ steps.gate.outputs.kind }}  # 'pre-open' / 'pre-close' / 'manual' (shown in-app)
         run: python -m src.pipeline
 
       - name: Rebuild slim seed.db
+        if: steps.gate.outputs.run == 'yes'
         run: python make_seed.py
 
       - name: Commit & push refreshed seed.db
+        if: steps.gate.outputs.run == 'yes'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

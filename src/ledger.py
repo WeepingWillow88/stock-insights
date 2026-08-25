@@ -13,7 +13,10 @@ import pandas as pd
 from . import db
 
 COLUMNS = ["ticker", "record_date", "entry", "stop", "target", "shares", "risk_gbp",
-           "status", "exit_date", "exit_price", "r_multiple", "outcome"]
+           "status", "sell_signal_date", "sell_reason",
+           "exit_date", "exit_price", "r_multiple", "outcome"]
+# status lifecycle: "open" -> "sell_pending" (exit flagged; shown as SELL today) -> "closed"
+# (filled at the next session's price the following run, i.e. next day).
 # Columns that must stay numeric — pandas 3.0 reads text-ish SQLite columns as a strict `str`
 # dtype, and later assigning a float into one (e.g. a fresh exit_price) raises TypeError. Coercing
 # on load keeps them float so the read-modify-write in update_open_positions is safe on any pandas.
@@ -37,7 +40,9 @@ def record_recommendations(sig, cfg, today=None):
     if sig is None or sig.empty or "selected" not in sig.columns:
         return 0
     led = _load(cfg)
-    open_tickers = set(led[led["status"] == "open"]["ticker"]) if not led.empty else set()
+    # Don't re-buy something we already hold OR are about to sell.
+    held = set(led[led["status"].isin(["open", "sell_pending"])]["ticker"]) if not led.empty else set()
+    open_tickers = held
     sel = sig[sig["selected"].astype(bool)]
     rows = []
     for _, r in sel.iterrows():
@@ -58,53 +63,70 @@ def record_recommendations(sig, cfg, today=None):
     return len(rows)
 
 
+def _first_exit(row, prices, cfg):
+    """First bar since entry where the exit triggers (trailing stop / trend break / time limit).
+    Returns (exit_date, reason) or (None, None) if still healthy."""
+    p = prices[prices["ticker"] == row["ticker"]].sort_values("date").copy()
+    if p.empty:
+        return None, None
+    p["sma_trend"] = p["close"].astype(float).rolling(cfg.trend_exit_sma).mean()
+    bars = p[p["date"] > str(row["record_date"])]
+    if bars.empty:
+        return None, None
+    entry, stop = float(row["entry"]), float(row["stop"])
+    atr0 = (entry - stop) / cfg.atr_stop_mult if cfg.atr_stop_mult else (entry - stop)
+    hh, held = entry, 0
+    for _, b in bars.iterrows():
+        held += 1
+        close, low = float(b["close"]), float(b["low"])
+        hh = max(hh, close)
+        trail = max(stop, hh - cfg.trail_atr_mult * atr0)
+        if low <= trail:
+            return b["date"], "hit the trailing stop"
+        if pd.notna(b["sma_trend"]) and close < float(b["sma_trend"]):
+            return b["date"], f"closed below its {cfg.trend_exit_sma}-day average (trend break)"
+        if held >= cfg.ledger_max_hold_days:
+            return b["date"], f"held the {cfg.ledger_max_hold_days}-day limit"
+    return None, None
+
+
 def update_open_positions(prices, cfg):
-    """Resolve open positions with the same exit model as the backtest: a **trailing stop**
-    (locks in gains as the trade runs) OR a **trend break** (a close below the trend SMA), with
-    a time limit as a backstop. Fills are gap-aware. Outcome is win/loss by the realised R."""
+    """Two-phase, manual-sell lifecycle:
+      • FLAG — an OPEN position whose exit triggers becomes **sell_pending** (shown as 'SELL today').
+      • FINALISE — a sell_pending position is **closed at the next session's price** (the following
+        run, i.e. the next day), so realised P&L reflects a realistic manual fill, not the exact
+        stop. Exit model = trailing stop / trend break / time limit (same as the backtest)."""
     led = _load(cfg)
     if led.empty:
         return 0
-    trail_mult = cfg.trail_atr_mult
     changed = 0
+
+    # Phase 1 — flag freshly-triggered exits as sell_pending (record the date it triggered).
     for idx, row in led[led["status"] == "open"].iterrows():
-        p = prices[prices["ticker"] == row["ticker"]].sort_values("date").copy()
-        if p.empty:
-            continue
-        p["sma_trend"] = p["close"].astype(float).rolling(cfg.trend_exit_sma).mean()
-        bars = p[p["date"] > str(row["record_date"])]
-        if bars.empty:
-            continue
-        entry, stop = float(row["entry"]), float(row["stop"])
-        atr0 = (entry - stop) / cfg.atr_stop_mult if cfg.atr_stop_mult else (entry - stop)
-        hh = entry  # highest close since entry (the "run-up high" the trail hangs off)
-        outcome = exit_price = exit_date = None
-        held = 0
-        for _, b in bars.iterrows():
-            held += 1
-            close, low = float(b["close"]), float(b["low"])
-            op = float(b["open"]) if pd.notna(b["open"]) else close
-            hh = max(hh, close)
-            trail = max(stop, hh - trail_mult * atr0)  # never below the initial stop
-            if low <= trail:  # trailing / initial stop hit — gap-aware fill at the open if it gapped
-                exit_price = min(trail, op) if op < trail else trail
-                outcome, exit_date = "stop", b["date"]
-                break
-            sma = b["sma_trend"]
-            if pd.notna(sma) and close < float(sma):  # trend broke — close below the trend SMA
-                exit_price, outcome, exit_date = close, "trend", b["date"]
-                break
-        if outcome is None and held >= cfg.ledger_max_hold_days:
-            last = bars.iloc[-1]
-            exit_price, outcome, exit_date = float(last["close"]), "time", last["date"]
-        if outcome:
-            stop_dist = entry - stop
-            trade_cost = cfg.backtest_cost_pct + cfg.backtest_spread_atr_coef * (atr0 / entry)
-            net = (exit_price / entry - 1) - trade_cost
-            r = net / (stop_dist / entry) if stop_dist > 0 else 0.0
-            led.loc[idx, ["status", "exit_date", "exit_price", "r_multiple", "outcome"]] = \
-                ["closed", exit_date, round(exit_price, 2), round(r, 2), "win" if r > 0 else "loss"]
+        exit_date, reason = _first_exit(row, prices, cfg)
+        if exit_date:
+            led.loc[idx, ["status", "sell_signal_date", "sell_reason"]] = \
+                ["sell_pending", exit_date, reason]
             changed += 1
+
+    # Phase 2 — finalise anything pending once a *later* session's price exists (next-day fill).
+    for idx, row in led[led["status"] == "sell_pending"].iterrows():
+        p = prices[prices["ticker"] == row["ticker"]].sort_values("date")
+        after = p[p["date"] > str(row["sell_signal_date"])]
+        if after.empty:
+            continue  # no new bar yet — stays 'SELL today' until the next run
+        bar = after.iloc[0]
+        entry, stop = float(row["entry"]), float(row["stop"])
+        exit_price = float(bar["close"])
+        atr0 = (entry - stop) / cfg.atr_stop_mult if cfg.atr_stop_mult else (entry - stop)
+        stop_dist = entry - stop
+        trade_cost = cfg.backtest_cost_pct + cfg.backtest_spread_atr_coef * (atr0 / entry)
+        net = (exit_price / entry - 1) - trade_cost
+        r = net / (stop_dist / entry) if stop_dist > 0 else 0.0
+        led.loc[idx, ["status", "exit_date", "exit_price", "r_multiple", "outcome"]] = \
+            ["closed", bar["date"], round(exit_price, 2), round(r, 2), "win" if r > 0 else "loss"]
+        changed += 1
+
     if changed:
         db.write_df(led, "ledger", cfg.db_path)
     return changed
@@ -150,6 +172,28 @@ def open_positions_view(prices, cfg):
             "unrealised_r": round(unreal_r, 2),
             "pnl_gbp": round(unreal_r * float(row.get("risk_gbp") or 0), 0),
             "action": action, "reason": reason, "as_of": str(p["date"].iloc[-1]),
+        })
+    return pd.DataFrame(rows)
+
+
+def pending_sells_view(prices, cfg):
+    """Positions flagged 'sell_pending' — the 'SELL these today' list. Read-only; they close at the
+    next session's price on the following run. Includes why, and the P&L so far at the latest price."""
+    led = _load(cfg)
+    pend = led[led["status"] == "sell_pending"] if not led.empty else led
+    rows = []
+    for _, row in pend.iterrows():
+        p = prices[prices["ticker"] == row["ticker"]].sort_values("date")
+        entry, stop = float(row["entry"]), float(row["stop"])
+        current = float(p["close"].astype(float).iloc[-1]) if not p.empty else entry
+        stop_dist = entry - stop
+        unreal_r = (current - entry) / stop_dist if stop_dist > 0 else 0.0
+        rows.append({
+            "ticker": row["ticker"], "shares": row.get("shares"),
+            "entry": round(entry, 2), "current": round(current, 2),
+            "flagged": row.get("sell_signal_date"), "reason": row.get("sell_reason"),
+            "unrealised_r": round(unreal_r, 2),
+            "pnl_gbp": round(unreal_r * float(row.get("risk_gbp") or 0), 0),
         })
     return pd.DataFrame(rows)
 

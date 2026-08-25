@@ -24,6 +24,7 @@ except Exception:  # noqa: BLE001 - no secrets file locally is fine
 # Seed the working DB on first run, and re-seed when a Cloud redeploy ships a snapshot covering
 # a later market date than a stale in-container copy. (Shared with the pipeline — see db.py.)
 from src import db as _db
+from src import ledger as _ledger
 _db.bootstrap_working_db(CONFIG.db_path, "data/seed.db", refresh_if_newer=True)
 
 # --- Optional password gate (set APP_PASSWORD in Streamlit secrets to enable) ---
@@ -119,8 +120,9 @@ a plain-English definition; the **🧠 How it works** tab explains the full meth
 rules, the sizing maths, and how the daily refresh works.
 
 ### The five tabs
-- **🎯 Signals & sizing** — today's picks: what to buy, how many shares, the safety-exit and
-  profit target, £ at risk, and a **Confidence %**.
+- **🎯 Signals & sizing** — today's timestamped action list: **🟢 BUY these** (new positions to
+  open) and **🔴 SELL these** (holdings to exit), with shares, safety-exit, profit target, £ at
+  risk and a **Confidence %**.
 - **📰 Macro & News** — the market mood, scheduled market-moving events, and per-stock news you
   can expand. The two refresh buttons live here.
 - **📈 Track record** — **your open positions with today's action** (live trailing-stop level +
@@ -141,6 +143,7 @@ rules, the sizing maths, and how the daily refresh works.
 | **Implied vol (IV)** | The move options are pricing in. IV well above recent *realized* moves = event brewing |
 | **R (risk multiple)** | Track-record unit: +1R = made what you risked, −1R = hit your stop |
 | **Regime** | Whether market conditions favour high-beta (RISK-ON) or not (RISK-OFF) |
+| **Track record (per signal)** | On each *All signals* row: this ticker's history in the ledger — 🟡 *Holding* an open position, or 🟢/🔴 the last closed result in R. It reflects a *past* call, so it can differ from today's fresh signal |
 
 > ⚠️ High beta moves fast **both ways**. This is decision-support and research — **not financial
 > advice**, and no tool guarantees profit. Your stops, sizing and diversification are what protect you.
@@ -274,17 +277,56 @@ with tab_sig:
                           "confidence bar."),
         }
 
-        # ---- Lead with the actionable buy list ----
+        # ---- Today's action list: what to BUY and what to SELL ----
         st.subheader("Today's suggested portfolio")
-        st.caption("Re-check the live price before you place any trade.")
-        st.markdown("**✅ Take these (top BUY signals within your 8-position limit):**")
-        if selected.empty:
-            st.info("No BUY signals qualify for the portfolio right now.")
+        _rk = "" if (_run_kind is None or pd.isna(_run_kind)) else str(_run_kind)
+        if "pre-close" in _rk:
+            _run_label = "pre-close run (~15 min before the bell)"
+        elif "pre-open" in _rk:
+            _run_label = "pre-open run (morning)"
+        elif _rk:
+            _run_label = f"{_rk} run"
+        else:
+            _run_label = ""
+        st.caption(f"🕒 Recommendations as of **{upd_pretty}**" + (f" ({upd_ago})" if upd_ago else "")
+                   + (f" · {_run_label}" if _run_label else "")
+                   + " — re-check the live price before you trade.")
+
+        held_tix = set()
+        if not ledger_df.empty and "status" in ledger_df.columns:
+            held_tix = set(ledger_df[ledger_df["status"].isin(["open", "sell_pending"])]["ticker"])
+
+        # BUY these — new entries only (names you already hold live in 'your open positions').
+        new_buys = selected[~selected["ticker"].isin(held_tix)] if not selected.empty else selected
+        st.markdown("**🟢 BUY these — new positions to open today:**")
+        if new_buys.empty:
+            st.info("No new BUYs today — either nothing new qualifies, or the top picks are names "
+                    "you already hold (see 'your open positions' on the Track record tab).")
         else:
             pcols = ["rank", "ticker", "sector", "conviction", "beta", "entry", "stop",
                      "target", "shares", "pos_value_usd", "risk_gbp", "flags", "reason"]
-            pcols = [c for c in pcols if c in selected.columns]
-            st.dataframe(selected[pcols], width="stretch", hide_index=True, column_config=money_cfg)
+            pcols = [c for c in pcols if c in new_buys.columns]
+            st.dataframe(new_buys[pcols], width="stretch", hide_index=True, column_config=money_cfg)
+
+        # SELL these — holdings the exit rules flagged today; they close at the next session's price.
+        _pending = _ledger.pending_sells_view(load_table("prices"), CONFIG)
+        st.markdown("**🔴 SELL these — exit today (a stop / trend / time exit has triggered):**")
+        if _pending.empty:
+            st.caption("Nothing to sell today — your open positions are all still healthy.")
+        else:
+            st.dataframe(_pending, width="stretch", hide_index=True, column_config={
+                "ticker": st.column_config.TextColumn("Ticker"),
+                "shares": st.column_config.NumberColumn("Shares", format="%d"),
+                "entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
+                "current": st.column_config.NumberColumn("Now", format="$%.2f"),
+                "flagged": st.column_config.TextColumn("Flagged"),
+                "reason": st.column_config.TextColumn("Why sell"),
+                "unrealised_r": st.column_config.NumberColumn("R so far", format="%+.2f"),
+                "pnl_gbp": st.column_config.NumberColumn("P&L so far (£)", format="£%d"),
+            })
+            st.caption("Sell these at your next opportunity. They move to **Closed trades** (Track "
+                       "record) once filled at the next session's price — that's the two-phase, "
+                       "manual-sell flow.")
 
         # ---- Portfolio summary (all in £ for consistency; no delta arrows) ----
         total_pos_gbp = total_pos_usd / fx_rate if fx_rate else 0.0
@@ -694,7 +736,11 @@ with tab_track:
                     help="Actual £ you'd have made/lost on the recommended shares, net of modelled trading costs."),
             })
             st.caption("Profit/loss is what the recommended share count would have made or lost, "
-                       "in £, net of modelled trading costs.")
+                       "in £, net of modelled trading costs. Each trade was resolved under the "
+                       "exit model live at the time it closed; a few early trades pre-date the "
+                       "current trailing-stop/trend-break model (which lets winners run further), "
+                       "so their results are the honest record of what was called then, not a "
+                       "re-simulation under today's rules.")
 
     st.markdown("---")
     st.markdown(f"### 🧪 Backtest — how the rules did over ~{CONFIG.backtest_years}")
@@ -936,6 +982,9 @@ Your rules drive the maths:
   **exit on a close below its {c.trend_exit_sma}-day average** (a broken trend). The 2:1 target is a
   reference, not a hard ceiling — trailing lets winners run and cuts losers early. The **track record
   scores trades exactly this way**, so the live scorecard reflects the rules you'd actually follow.
+  Each row in the **All signals** table carries a **Track record** tag linking it to this ledger
+  (🟡 *Holding*, or 🟢/🔴 the last closed result in R). That's a *past* call and can legitimately differ
+  from today's fresh signal — a name can be bought, closed as a win, and rate HOLD again days later.
 
 #### Step 7 — Build the portfolio
 Fill up to **{c.max_positions} positions** from the BUY signals by rank, subject to three guards:
@@ -1013,10 +1062,20 @@ and rebuilds signals **on the prices already stored** — it's quick and is what
 anything change?" check uses, but it does **not** move the market-data date. *Pull fresh prices*
 (and the full `python -m src.pipeline`) re-downloads the whole price history and recomputes
 everything — that's what advances **market data through** to the latest trading day. On the
-hosted app a **scheduled job (GitHub Actions)** runs the full pipeline daily before the open and
-after the close, rebuilds the shared `seed.db` baseline and pushes it, so the live app redeploys
-with current prices without anyone pressing a button. (Pressing *Pull fresh prices* in the hosted
-app refreshes your current session only — the cloud filesystem is temporary.)
+hosted app a **scheduled job (GitHub Actions)** runs the full pipeline twice each weekday — once
+**pre-open** (morning) and once **~15 min before the close** — rebuilds the shared `seed.db` and
+pushes it, so the live app refreshes without anyone pressing a button. Each recommendation is
+**timestamped** with which run produced it. (Pressing *Pull fresh prices* in the hosted app
+refreshes your current session only — the cloud filesystem is temporary.)
+
+**The daily buy/sell rhythm.** The Signals tab is a clean two-list action plan:
+- **🟢 BUY these** — *new* positions to open today (names you already hold aren't repeated; they
+  live under *your open positions* on the Track record tab). Each run's buy list is a fresh
+  snapshot at that run's prices.
+- **🔴 SELL these** — holdings whose exit has triggered (trailing stop / trend break / time limit).
+  This is a **two-phase, manual-sell** flow: a name is flagged **SELL today**, you sell at your
+  next opportunity, and on the **next run it's closed at that session's price** and moves to
+  **Closed trades** — so the recorded P&L reflects a realistic manual fill, not the exact stop.
 
 **Alerts.** Each run (before the open / after the close) emails a digest — or saves it to
 `data/alerts/` if email isn't configured. Between runs, an **hourly news-shock check**
