@@ -254,7 +254,11 @@ with tab_sig:
             "price": st.column_config.NumberColumn("Price", format="$%.2f",
                      help="Latest share price, in US dollars."),
             "entry": st.column_config.NumberColumn("Buy at", format="$%.2f",
-                     help="Suggested price to buy around."),
+                     help="The signal price (last close when the recommendation was made)."),
+            "buy_up_to": st.column_config.NumberColumn("Buy up to", format="$%.2f",
+                     help="Don't chase above this. It's the buy price plus ¼ of the distance to your "
+                          "stop — pay more and your reward-to-risk gets too thin. If the live price is "
+                          "already above it, skip the trade or wait for a pullback."),
             "stop": st.column_config.NumberColumn("Safety exit", format="$%.2f",
                      help="Stop-loss: if the price falls here, sell to cap your loss. "
                           "Set two average daily swings (2×ATR) below the buy price."),
@@ -323,10 +327,19 @@ with tab_sig:
             st.info("No new BUYs recommended today. (Names you already hold appear under "
                     "**📌 your open positions** on the Track record tab, not here.)")
         else:
-            pcols = ["ticker", "sector", "conviction", "beta", "entry", "stop", "target",
-                     "shares", "risk_gbp", "flags", "reason"]
+            new_buys = new_buys.copy()
+            new_buys["buy_up_to"] = (
+                new_buys["entry"].astype(float)
+                + CONFIG.max_chase_frac * (new_buys["entry"].astype(float) - new_buys["stop"].astype(float))
+            ).round(2)
+            pcols = ["ticker", "sector", "conviction", "beta", "entry", "buy_up_to", "stop",
+                     "target", "shares", "risk_gbp", "flags", "reason"]
             pcols = [c for c in pcols if c in new_buys.columns]
             st.dataframe(new_buys[pcols], width="stretch", hide_index=True, column_config=money_cfg)
+            st.caption("**Buy at** is the signal price (last close); **Buy up to** is the most it's "
+                       "worth paying today. If the live price is above **Buy up to**, the entry has "
+                       "run too far past the signal — skip it or wait for a pullback (chasing thins "
+                       "your reward-to-risk).")
 
         # SELL these — holdings the exit rules flagged today; they close at the next session's price.
         _pending = _ledger.pending_sells_view(load_table("prices"), CONFIG)
@@ -996,6 +1009,10 @@ Your rules drive the maths:
   2. `(£{c.capital_gbp:,.0f} ÷ {c.max_positions} positions) ÷ entry price` (equal-weight capital slot).
 
   Taking the smaller means you **never risk more than £{risk_gbp:,.0f}** *and* **never overspend one slot**.
+- **Don't chase (Buy up to)** — the "Buy at" price is the signal's last close; by the time you look,
+  the live price may have moved. **Buy up to = entry + {c.max_chase_frac:.0%} of the stop distance**
+  (≈ half an ATR) is the most it's worth paying that day. Above it, your fixed stop makes the
+  reward-to-risk too thin — skip it or wait for a pullback.
 - **Managing the exit** — the initial stop is your safety net, but the trade is then **trailed**: as it
   runs, ratchet the stop up to **{c.trail_atr_mult:.1f} × ATR below the highest close so far**, and also
   **exit on a close below its {c.trend_exit_sma}-day average** (a broken trend). The 2:1 target is a

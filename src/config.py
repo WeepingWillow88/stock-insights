@@ -65,6 +65,8 @@ class Config:
     # --- Signals & position sizing (Phase 2) ---
     atr_stop_mult: float = 2.0     # stop distance = 2 x ATR (wide, for high beta)
     reward_risk: float = 2.0       # target = entry + 2 x stop distance (2:1)
+    max_chase_frac: float = 0.25   # 'don't chase': OK to buy up to entry + this x the stop distance
+    #                                (≈ 0.5 x ATR). Above it, reward:risk degrades too far — skip/wait.
     rsi_period: int = 14
     rsi_overbought: float = 70.0
     rsi_min_buy: float = 45.0      # below this, momentum too weak to enter
