@@ -306,19 +306,25 @@ with tab_sig:
                    + (f" · {_run_label}" if _run_label else "")
                    + " — re-check the live price before you trade.")
 
-        held_tix = set()
-        if not ledger_df.empty and "status" in ledger_df.columns:
-            held_tix = set(ledger_df[ledger_df["status"].isin(["open", "sell_pending"])]["ticker"])
-
-        # BUY these — new entries only (names you already hold live in 'your open positions').
-        new_buys = selected[~selected["ticker"].isin(held_tix)] if not selected.empty else selected
-        st.markdown("**🟢 BUY these — new positions to open today:**")
+        # BUY these — the positions actually OPENED on the latest run date (today's buys). They
+        # persist for the whole day (both runs) and refresh out to 'your open positions' next day,
+        # rather than vanishing the instant they're logged.
+        _today_open = ledger_df.iloc[0:0]
+        if not ledger_df.empty and {"record_date", "status"}.issubset(ledger_df.columns):
+            _today_open = ledger_df[(ledger_df["record_date"].astype(str) == str(run_date))
+                                    & (ledger_df["status"].isin(["open", "sell_pending"]))].copy()
+        _sig_extra = (signals_df[[c for c in ["ticker", "sector", "conviction", "beta", "flags", "reason"]
+                                  if c in signals_df.columns]]
+                      if not signals_df.empty else pd.DataFrame(columns=["ticker"]))
+        new_buys = (_today_open.merge(_sig_extra, on="ticker", how="left")
+                    if not _today_open.empty else _today_open)
+        st.markdown(f"**🟢 BUY these — new positions recommended today ({run_date}):**")
         if new_buys.empty:
-            st.info("No new BUYs today — either nothing new qualifies, or the top picks are names "
-                    "you already hold (see 'your open positions' on the Track record tab).")
+            st.info("No new BUYs recommended today. (Names you already hold appear under "
+                    "**📌 your open positions** on the Track record tab, not here.)")
         else:
-            pcols = ["rank", "ticker", "sector", "conviction", "beta", "entry", "stop",
-                     "target", "shares", "pos_value_usd", "risk_gbp", "flags", "reason"]
+            pcols = ["ticker", "sector", "conviction", "beta", "entry", "stop", "target",
+                     "shares", "risk_gbp", "flags", "reason"]
             pcols = [c for c in pcols if c in new_buys.columns]
             st.dataframe(new_buys[pcols], width="stretch", hide_index=True, column_config=money_cfg)
 
