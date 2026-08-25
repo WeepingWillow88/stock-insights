@@ -231,10 +231,24 @@ with tab_sig:
         selected = sig[sig["selected"]]
 
         capital_usd = CONFIG.capital_gbp * fx_rate
-        total_pos_usd = float(selected["pos_value_usd"].sum())
-        total_risk_gbp = float(selected["risk_gbp"].sum())
+        # Portfolio summary reflects your ACTUAL open holdings (the running book), NOT today's fresh
+        # BUY picks — otherwise it reads £0 on a no-new-buys day while you're holding positions.
+        _open = (ledger_df[ledger_df["status"] == "open"].copy()
+                 if (not ledger_df.empty and "status" in ledger_df.columns) else ledger_df.iloc[0:0])
+        n_open = int(len(_open))
+        _prices_now = load_table("prices")
+        _last_close = (_prices_now.sort_values("date").groupby("ticker")["close"].last()
+                       if not _prices_now.empty else pd.Series(dtype=float))
+        total_pos_gbp = 0.0
+        for _, _r in _open.iterrows():
+            _cur = float(_last_close.get(_r["ticker"], _r.get("entry") or 0) or 0)
+            total_pos_gbp += float(_r.get("shares") or 0) * _cur
+        total_pos_gbp = total_pos_gbp / fx_rate if fx_rate else 0.0
+        total_risk_gbp = (float(pd.to_numeric(_open["risk_gbp"], errors="coerce").fillna(0).sum())
+                          if n_open else 0.0)
+        cash_free_gbp = max(CONFIG.capital_gbp - total_pos_gbp, 0.0)
+        deployed_pct = total_pos_gbp / CONFIG.capital_gbp * 100 if CONFIG.capital_gbp else 0
         heat_pct = total_risk_gbp / CONFIG.capital_gbp * 100 if CONFIG.capital_gbp else 0
-        deployed_pct = total_pos_usd / capital_usd * 100 if capital_usd else 0
 
         money_cfg = {
             "price": st.column_config.NumberColumn("Price", format="$%.2f",
@@ -328,22 +342,21 @@ with tab_sig:
                        "record) once filled at the next session's price — that's the two-phase, "
                        "manual-sell flow.")
 
-        # ---- Portfolio summary (all in £ for consistency; no delta arrows) ----
-        total_pos_gbp = total_pos_usd / fx_rate if fx_rate else 0.0
-        cash_free_gbp = max(CONFIG.capital_gbp - total_pos_gbp, 0.0)
+        # ---- Your portfolio right now (your ACTUAL holdings — all £, no delta arrows) ----
+        st.markdown("**Your portfolio right now** (what you currently hold):")
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("BUY signals", int((sig["signal"] == "BUY").sum()),
-                  help="Stocks that currently rate a BUY (before the portfolio caps are applied).")
-        c2.metric("Positions taken", f"{int(selected.shape[0])} / {CONFIG.max_positions}",
-                  help="How many of your maximum slots the portfolio filled today.")
+        c1.metric("New BUYs today", int(len(new_buys)),
+                  help="New positions suggested to open today (after all the gates/caps).")
+        c2.metric("Positions held", f"{n_open} / {CONFIG.max_positions}",
+                  help="Open positions you're currently holding, vs your maximum.")
         c3.metric("Capital deployed", f"£{total_pos_gbp:,.0f}",
-                  help=f"Cash these positions tie up — {deployed_pct:.0f}% of your £{CONFIG.capital_gbp:,.0f}.")
+                  help=f"Value of your open holdings at the latest price — {deployed_pct:.0f}% of your £{CONFIG.capital_gbp:,.0f}.")
         c4.metric("Portfolio heat", f"£{total_risk_gbp:,.0f}",
-                  help=f"Total you'd lose if every stop hit at once — {heat_pct:.1f}% of capital "
-                       f"(ceiling {CONFIG.max_portfolio_heat*100:.0f}%). This is money *at risk*, not money invested.")
-        c5.metric("Cash free", f"£{cash_free_gbp:,.0f}", help="Uninvested cash left over.")
+                  help=f"£ at risk across your open positions if their stops hit — {heat_pct:.1f}% of "
+                       f"capital (ceiling {CONFIG.max_portfolio_heat*100:.0f}%). Money *at risk*, not invested.")
+        c5.metric("Cash free", f"£{cash_free_gbp:,.0f}", help="Uninvested cash.")
         st.caption(f"**{deployed_pct:.0f}%** of your £{CONFIG.capital_gbp:,.0f} deployed across "
-                   f"{int(selected.shape[0])} position(s) · **{heat_pct:.1f}%** at risk "
+                   f"**{n_open}** open position(s) · **{heat_pct:.1f}%** at risk "
                    f"(cap {CONFIG.max_portfolio_heat*100:.0f}%) · **{max(100 - deployed_pct, 0):.0f}%** in cash.")
 
         # ---- One-line market-regime badge (full detail on 📰 Macro & News) ----
