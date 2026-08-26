@@ -53,6 +53,23 @@ def get_sectors():
         return {}
 
 
+def get_names():
+    """Map ticker -> company (security) name from Wikipedia. Empty dict on failure (the news
+    relevance filter then falls back to matching the ticker symbol only). Used to keep off-topic,
+    cross-tagged headlines (an ETF/sector piece that merely name-drops the stock) out of the
+    per-ticker sentiment read."""
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=20)
+        resp.raise_for_status()
+        df = pd.read_html(io.StringIO(resp.text))[0]
+        syms = df["Symbol"].astype(str).str.replace(".", "-", regex=False)
+        return dict(zip(syms, df["Security"].astype(str)))
+    except Exception as e:  # noqa: BLE001
+        print(f"[universe] name fetch failed ({e}); news relevance will match tickers only.")
+        return {}
+
+
 _SP_PAGES = {
     400: "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",  # mid caps
     600: "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",  # small caps

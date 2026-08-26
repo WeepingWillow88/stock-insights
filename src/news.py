@@ -16,10 +16,14 @@ Output per ticker:
   headlines    the raw headlines (so the reader can dig in)
 """
 import datetime as dt
+import html
 import os
+import re
 import xml.etree.ElementTree as ET
 
 import requests
+
+from . import universe
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 
@@ -31,25 +35,111 @@ _POS = ["beat", "beats", "record", "surge", "surges", "upgrade", "raise", "raise
         "jump", "jumps", "expand", "approval", "approved", "wins", "strong", "rally",
         "breakthrough", "partnership", "gains", "rises", "rose", "outperform", "tops"]
 
-# Finnhub's free company-news feed tags a lot of generic, market-wide screener/aggregator
-# content to individual symbols (a stock merely appears in a "most active S&P 500" listicle).
-# That's noise for a per-stock sentiment read, so we drop it and keep the company-specific items.
+# Finnhub's free company-news feed (and Google News' loose "TICKER stock" match) tag a lot of
+# generic, market-wide screener/aggregator content to individual symbols (a stock merely appears
+# in a "most active S&P 500" listicle, or an ETF/sector round-up name-drops it). That's noise for a
+# per-stock sentiment read, so we drop it and keep the company-specific items.
 _NOISE_SOURCES = ("chartmill", "valueengine", "marketbeat", "simply wall")
 _NOISE_HEADLINE = ("s&p500", "s&p 500", "most active", "top movers", "gap up", "gap down",
                    "trading volume", "today's session", "market summary", "stocks to watch",
-                   "biggest movers", "premarket", "market wrap", "week in review")
+                   "biggest movers", "biggest gainers", "biggest losers", "premarket",
+                   "market wrap", "week in review", "whale activity", "unusual options",
+                   "options activity", "lightning round", "stocks to buy", "stocks to watch now")
+# Listicle pattern: "10 Information Technology Stocks ...", "7 Stocks To Buy ..." — a numbered
+# round-up where the ticker is one of many, never a company-specific story.
+_LISTICLE_RE = re.compile(r"^\s*\d+\s+[\w\s.&/'-]*\bstocks?\b", re.I)
+# Corporate suffixes / filler dropped when picking a company's distinctive "brand" word.
+_NAME_STOP = {"the", "inc", "corp", "corporation", "co", "company", "companies", "ltd", "plc",
+              "group", "holdings", "holding", "technologies", "technology", "systems",
+              "international", "industries", "enterprises", "and", "class"}
+
+
+def _normalize(s):
+    """Straighten curly quotes/apostrophes so phrase filters match reliably ("today's" vs "today's")."""
+    return (s.replace("’", "'").replace("‘", "'")
+            .replace("“", '"').replace("”", '"'))
+
+
+def _clean_text(s):
+    """Un-escape HTML entities and repair the common UTF-8-read-as-Latin-1 mojibake (e.g. an em
+    dash showing as 'â€"'). Only attempts the byte round-trip when the tell-tale bytes are present,
+    and keeps the original on failure — so clean text is never corrupted."""
+    if not s:
+        return s
+    s = html.unescape(s)
+    # The classic "â€"/"Ã"/"Â" mojibake is UTF-8 bytes misdecoded as Windows-1252 (cp1252, not
+    # Latin-1 — the tell-tale "€"/curly-quote bytes only exist in cp1252). Reverse it by encoding
+    # back to cp1252 then decoding as UTF-8. Only when the signature is present, and keep the
+    # original on failure, so clean text is never corrupted.
+    if "Ã" in s or "â€" in s or "Â" in s:
+        try:
+            s = s.encode("cp1252").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return s.strip()
 
 
 def _is_market_noise(headline, source):
-    h, s = headline.lower(), source.lower()
+    h, s = _normalize(headline.lower()), source.lower()
     if any(n in s for n in _NOISE_SOURCES):
+        return True
+    if _LISTICLE_RE.search(_normalize(headline)):
         return True
     return any(n in h for n in _NOISE_HEADLINE)
 
 
+def _brand_word(name):
+    """The distinctive first word of a company name (e.g. 'Palantir' from 'Palantir Technologies
+    Inc.'), skipping a leading 'The' and corporate filler. None if nothing usable."""
+    if not name:
+        return None
+    for w in re.sub(r"[.,]", " ", str(name)).split():
+        wl = w.lower()
+        if len(wl) >= 3 and wl not in _NAME_STOP:
+            return wl
+    return None
+
+
+def _relevance_tokens(ticker, name):
+    """Lower-cased tokens a headline must contain to count as on-topic: the ticker (if it's long
+    enough to match safely) and the company's brand word. Empty => can't match safely, so relevance
+    filtering is skipped for this name rather than over-dropping."""
+    toks = set()
+    if ticker and len(ticker) >= 3:
+        toks.add(ticker.lower())
+    brand = _brand_word(name)
+    if brand:
+        toks.add(brand)
+    return toks
+
+
+def _is_relevant(text, tokens):
+    """True if the item is about this company: the ticker or brand word appears as a whole word.
+    True when tokens is empty (we can't verify safely — don't over-filter)."""
+    if not tokens:
+        return True
+    t = text.lower()
+    return any(re.search(rf"\b{re.escape(tok)}\b", t) for tok in tokens)
+
+
+_NAME_MAP = None
+
+
+def _company_name(ticker):
+    """Company name for a ticker (cached per process); '' if unknown."""
+    global _NAME_MAP
+    if _NAME_MAP is None:
+        try:
+            _NAME_MAP = universe.get_names()
+        except Exception:  # noqa: BLE001
+            _NAME_MAP = {}
+    return _NAME_MAP.get(ticker, "")
+
+
 def _google_rss(ticker, limit, days, site=None):
     """Recent headline TITLES for a ticker via Google News RSS (free, no key). Titles only.
-    Pass `site` (e.g. "cnbc.com") to restrict the query to a single outlet."""
+    Pass `site` (e.g. "cnbc.com") to restrict the query to a single outlet. Titles are cleaned
+    (entities/mojibake); relevance + noise filtering happen in fetch_headlines."""
     q = f"{ticker}+stock+when:{days}d"
     if site:
         q += f"+site:{site}"
@@ -59,16 +149,18 @@ def _google_rss(ticker, limit, days, site=None):
         resp = requests.get(url, headers=_HEADERS, timeout=15)
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
-        titles = [it.findtext("title", default="").strip() for it in root.iter("item")]
+        titles = [_clean_text(it.findtext("title", default="")) for it in root.iter("item")]
         return _dedupe([t for t in titles if t])[:limit]
     except Exception:  # noqa: BLE001
         return []
 
 
-def _finnhub_news(ticker, cfg, limit):
-    """Recent company news (headline + summary + source, reliably tagged to the ticker) from
-    Finnhub when FINNHUB_API_KEY is set. Returns richer item strings, or None on any failure so
-    callers fall back to the RSS titles. Free tier covers /company-news."""
+def _finnhub_news(ticker, cfg, limit, tokens):
+    """Recent company news (headline + summary + source) from Finnhub when FINNHUB_API_KEY is set.
+    Free-tier tagging is loose, so we filter across ALL rows for market-wide screener noise AND
+    for relevance (the ticker or company brand must appear in the headline+summary) before capping
+    to `limit` — otherwise off-topic, cross-tagged stories eat the slots. Returns richer item
+    strings, or None on any failure so callers fall back to the RSS titles."""
     key = os.environ.get("FINNHUB_API_KEY")
     if not key:
         return None
@@ -82,14 +174,14 @@ def _finnhub_news(ticker, cfg, limit):
             return None
         rows = sorted(rows, key=lambda r: r.get("datetime", 0), reverse=True)
         items = []
-        for r in rows:  # filter across ALL rows first, so screener noise doesn't eat the slots
-            head = str(r.get("headline", "")).strip()
+        for r in rows:
+            head = _clean_text(str(r.get("headline", "")))
             if not head:
                 continue
-            src = str(r.get("source", "")).strip()
-            if _is_market_noise(head, src):
+            src = _clean_text(str(r.get("source", "")))
+            summ = _clean_text(str(r.get("summary", "")))
+            if _is_market_noise(head, src) or not _is_relevant(f"{head} {summ}", tokens):
                 continue
-            summ = str(r.get("summary", "")).strip()
             txt = head + (f" — {summ}" if summ else "") + (f" [{src}]" if src else "")
             items.append(txt[:400])  # cap so one long story can't dominate the prompt
             if len(items) >= limit:
@@ -106,17 +198,24 @@ def _cnbc_rss(ticker, limit, days):
 
 
 def fetch_headlines(ticker, cfg):
-    """Recent news items for a ticker: Finnhub (headline + summary + source) if a key is set,
-    else Google News RSS titles. Falls back to RSS when Finnhub's free feed leaves too few
-    company-specific items after the screener-noise filter. When cfg.use_cnbc is on, CNBC
-    headlines for the ticker are blended in (surfaced first) so that outlet is always represented.
-    Returns a list of strings, deduped and capped at cfg.news_headlines."""
-    items = _finnhub_news(ticker, cfg, cfg.news_headlines)
-    if not (items and len(items) >= 2):
-        rss = _google_rss(ticker, cfg.news_headlines, cfg.news_lookback_days)
-        items = rss or items or []
+    """Recent, on-topic news items for a ticker. Finnhub (headline + summary + source) is the
+    trusted per-symbol source; Google News RSS is a **last resort**, used only when Finnhub yields
+    nothing on-topic — its loose "TICKER stock" query cross-tags unrelated ETF/sector stories.
+    Every item is stripped of market-wide screener noise AND checked for relevance (the ticker or
+    the company's brand name must appear), so an off-topic headline can't reach the scorer. When
+    cfg.use_cnbc is on, on-topic CNBC headlines are blended in (surfaced first) so that outlet is
+    always represented. Returns a list of strings, deduped and capped at cfg.news_headlines."""
+    tokens = _relevance_tokens(ticker, _company_name(ticker))
+
+    def _keep_rss(titles):
+        return [t for t in titles
+                if not _is_market_noise(t, "") and _is_relevant(t, tokens)]
+
+    items = _finnhub_news(ticker, cfg, cfg.news_headlines, tokens) or []
+    if not items:  # Finnhub gave nothing on-topic -> fall back to (filtered) RSS titles
+        items = _keep_rss(_google_rss(ticker, cfg.news_headlines, cfg.news_lookback_days))
     if getattr(cfg, "use_cnbc", False):
-        cnbc = _cnbc_rss(ticker, cfg.cnbc_headlines, cfg.news_lookback_days)
+        cnbc = _keep_rss(_cnbc_rss(ticker, cfg.cnbc_headlines, cfg.news_lookback_days))
         if cnbc:
             items = _dedupe(cnbc + list(items))
     return list(items)[:cfg.news_headlines]
