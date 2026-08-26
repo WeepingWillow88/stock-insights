@@ -244,14 +244,18 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
         if nws:
             lbl = nws.get("label", "")
             bias = nws.get("action_bias", "none")
+            # Only a real NLP engine (Claude / FinBERT) may BLOCK a technically valid BUY. The
+            # keyword fallback is too crude to trust with that veto (it can't read "reiterated Buy
+            # rating" and mis-scores a neutral tape as negative), so it may only add a caution note.
+            trusted = nws.get("source") in ("claude", "finbert")
             if lbl and lbl != "neutral":
                 flags.append(f"news:{lbl}")
-            if signal == "BUY" and bias == "avoid" and cfg.news_avoid_downgrades_buy:
+            if signal == "BUY" and bias == "avoid" and cfg.news_avoid_downgrades_buy and trusted:
                 signal = "HOLD"
                 reason = (f"Fresh negative news ({nws.get('macro_driver', 'company_specific')}) — "
                           f"{nws.get('rationale', '')[:70]}; ") + reason
-            elif signal == "BUY" and bias == "caution_hold":
-                reason += " (news caution)"
+            elif signal == "BUY" and bias in ("avoid", "caution_hold"):
+                reason += " (news caution — keyword scan only)" if not trusted else " (news caution)"
 
         # Layer E: post-earnings drift (PEAD). The conviction was already nudged above; here we
         # surface it and let a *strong* negative gap veto a fresh long (drift is against it).
