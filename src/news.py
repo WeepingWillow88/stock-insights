@@ -47,9 +47,13 @@ def _is_market_noise(headline, source):
     return any(n in h for n in _NOISE_HEADLINE)
 
 
-def _google_rss(ticker, limit, days):
-    """Recent headline TITLES for a ticker via Google News RSS (free, no key). Titles only."""
-    url = (f"https://news.google.com/rss/search?q={ticker}+stock+when:{days}d"
+def _google_rss(ticker, limit, days, site=None):
+    """Recent headline TITLES for a ticker via Google News RSS (free, no key). Titles only.
+    Pass `site` (e.g. "cnbc.com") to restrict the query to a single outlet."""
+    q = f"{ticker}+stock+when:{days}d"
+    if site:
+        q += f"+site:{site}"
+    url = (f"https://news.google.com/rss/search?q={q}"
            f"&hl=en-US&gl=US&ceid=US:en")
     try:
         resp = requests.get(url, headers=_HEADERS, timeout=15)
@@ -95,15 +99,27 @@ def _finnhub_news(ticker, cfg, limit):
         return None
 
 
+def _cnbc_rss(ticker, limit, days):
+    """Recent CNBC headlines for a ticker (free, no key) via a site-restricted Google News RSS
+    query. CNBC has no per-symbol RSS/API of its own, so we filter Google News to cnbc.com."""
+    return _google_rss(ticker, limit, days, site="cnbc.com")
+
+
 def fetch_headlines(ticker, cfg):
     """Recent news items for a ticker: Finnhub (headline + summary + source) if a key is set,
     else Google News RSS titles. Falls back to RSS when Finnhub's free feed leaves too few
-    company-specific items after the screener-noise filter. Returns a list of strings."""
+    company-specific items after the screener-noise filter. When cfg.use_cnbc is on, CNBC
+    headlines for the ticker are blended in (surfaced first) so that outlet is always represented.
+    Returns a list of strings, deduped and capped at cfg.news_headlines."""
     items = _finnhub_news(ticker, cfg, cfg.news_headlines)
-    if items and len(items) >= 2:
-        return items
-    rss = _google_rss(ticker, cfg.news_headlines, cfg.news_lookback_days)
-    return rss or items or []
+    if not (items and len(items) >= 2):
+        rss = _google_rss(ticker, cfg.news_headlines, cfg.news_lookback_days)
+        items = rss or items or []
+    if getattr(cfg, "use_cnbc", False):
+        cnbc = _cnbc_rss(ticker, cfg.cnbc_headlines, cfg.news_lookback_days)
+        if cnbc:
+            items = _dedupe(cnbc + list(items))
+    return list(items)[:cfg.news_headlines]
 
 
 def _dedupe(titles):

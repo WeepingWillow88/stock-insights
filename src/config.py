@@ -101,8 +101,9 @@ class Config:
     news_lookback_days: int = 4           # how far back to pull news
     news_avoid_downgrades_buy: bool = True  # a strongly negative news read turns BUY -> HOLD
     # News source: Finnhub company-news (headline + summary + source, reliable ticker tagging) when
-    # FINNHUB_API_KEY is set; otherwise falls back to Google News RSS titles. Claude also gets the
-    # stock's recent price move + the market regime as context, so it reads the *reaction*.
+    # FINNHUB_API_KEY is set; otherwise falls back to Google News RSS titles. When use_cnbc is on,
+    # CNBC headlines are blended in on top. Claude also gets the stock's recent price move + the
+    # market regime as context, so it reads the *reaction*.
 
     # --- Options-implied vol + short-interest overlays (B2 / B3, best-effort via yfinance) ---
     fetch_market_extras: bool = True      # pull IV + short interest for the shortlist each run
@@ -113,6 +114,9 @@ class Config:
     shock_move_pct: float = 0.05          # a >=5% intraday move triggers a news look
 
     # --- Backtester + track-record ledger ---
+    use_cnbc: bool = True                 # blend in CNBC headlines (site-restricted Google News RSS,
+    #                                       no key) so that outlet is always represented per ticker
+    cnbc_headlines: int = 3               # CNBC items to surface per ticker before the rest of the feed
     backtest_years: str = "10y"           # how much history to replay (incl. bear markets)
     backtest_universe_max: int = 120      # cap to the most liquid high-beta names for speed
     backtest_max_hold_days: int = 40      # backstop time exit (trailing/trend exits do the work)

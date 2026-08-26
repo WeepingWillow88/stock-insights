@@ -138,7 +138,7 @@ rules, the sizing maths, and how the daily refresh works.
 | **Confidence %** | How many independent checks agree (trend, momentum, RSI, news). A BUY must clear a minimum bar |
 | **RSI / "momentum"** | 0–100 gauge. >70 overheated, <30 beaten-down; 45–65 is the healthy buy zone |
 | **Daily swing (ATR)** | Typical size of a day's move — sets how wide the safety-exit sits |
-| **News mood** | 🔴/⚪/🟢 read of recent headlines (engine shown on the Macro & News tab) |
+| **News mood** | 🔴/⚪/🟢 read of recent headlines (sources incl. **CNBC**; engine shown on the Macro & News tab) |
 | **Short interest** | Shares bet against the stock, as % of float. High = squeeze fuel but crowded |
 | **Implied vol (IV)** | The move options are pricing in. IV well above recent *realized* moves = event brewing |
 | **R (risk multiple)** | Track-record unit: +1R = made what you risked, −1R = hit your stop |
@@ -581,8 +581,9 @@ with tab_news:
     else:
         _srcmode = news_df["source"].mode() if "source" in news_df.columns else pd.Series([], dtype=object)
         src = _srcmode.iloc[0] if not _srcmode.empty else "?"
-        st.caption(f"Each stock's recent headlines, scored for a short-term trader "
-                   f"(sentiment engine: **{src}**). Expand a stock to read the headlines yourself.")
+        st.caption(f"Each stock's recent headlines (Finnhub / Google News, with **CNBC** always "
+                   f"included), scored for a short-term trader (sentiment engine: **{src}**). "
+                   f"Expand a stock to read the headlines yourself.")
         only = st.radio("Show", ["All", "Only negative", "Only positive"],
                         horizontal=True, label_visibility="collapsed")
         view = news_df.copy()
@@ -1083,7 +1084,8 @@ This is exactly the "Micron dips on inflation/Iran news but recovers" instinct, 
 the app won't pile into high beta into a CPI print or a risk-off tape.
 
 **Layer C — news sentiment (live).** For each shortlist stock the app pulls recent
-headlines and scores them for a short-term trader — sentiment (−1…+1), a plain-English
+headlines (Finnhub / Google News, with **CNBC** coverage always blended in) and scores
+them for a short-term trader — sentiment (−1…+1), a plain-English
 read, the macro driver (inflation/rates/geopolitical/earnings), and an action bias. A
 **strongly negative, material** news read turns a 🟢 BUY into a 🟡 HOLD; milder concerns
 get flagged. Scoring uses the best engine available, in order: the **Claude API**
@@ -1141,7 +1143,7 @@ Keys live in a local `.env` (or the hosted app's GitHub Action secrets) — neve
 |---|---|---|---|
 | **Prices** (signals, regime, backtest) | yfinance — free, unofficial | — | Accurate & fine. A paid feed (Polygon/Tiingo) only matters for *reliability* if this ever drives real money |
 | **Market backdrop / regime** | yfinance: SPY, QQQ, VIX, SMH, US 10-yr, HYG credit + breadth | — | **Strong as-is — no paid source needed.** Well-diversified multi-factor read |
-| **Per-stock news** | Google News RSS *titles* → **Finnhub** company-news (`FINNHUB_API_KEY`) — headline + summary + source, screener-noise filtered | Finnhub **free** tier | Finnhub free is enough; the app drops generic "most-active" aggregator spam and falls back to RSS if too few real items remain |
+| **Per-stock news** | Google News RSS *titles* → **Finnhub** company-news (`FINNHUB_API_KEY`) — headline + summary + source, screener-noise filtered — plus **CNBC** headlines blended in (site-restricted Google News RSS, no key) | Finnhub **free** tier | Finnhub free is enough; the app drops generic "most-active" aggregator spam, always surfaces CNBC coverage, and falls back to RSS if too few real items remain |
 | **News sentiment** | keyword scan → local **FinBERT** → **Claude** (`ANTHROPIC_API_KEY`, `{c.claude_model}`) | Claude (pennies/run) | **Biggest free-ish win: set `ANTHROPIC_API_KEY`.** Claude reads the *reaction* in market context; keywords can't |
 | **Macro calendar** (CPI/FOMC/jobs) | curated seeded list (`events.py`) | **FMP** economic-calendar (`FMP_API_KEY`, **paid tier only**) | **The one thing worth paying for.** Free FMP/Finnhub tiers 402 here; the seeded list works but must be kept current |
 | **Earnings dates** | **FMP** earnings-calendar (free, where it has the name) → yfinance fallback | FMP paid = full coverage | Free tier samples a subset, so it *supplements* yfinance rather than replacing it |
