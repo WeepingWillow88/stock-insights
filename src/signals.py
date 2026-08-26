@@ -325,34 +325,46 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
             "entry": np.nan, "stop": np.nan, "target": np.nan,
             "shares": np.nan, "pos_value_usd": np.nan,
             "risk_usd": np.nan, "risk_gbp": np.nan, "binding": "",
+            # Helper fields for the dashboard's capital / max-positions what-if: stop_dist and the
+            # (capital-independent) size multiplier let sizing be recomputed offline without a re-run.
+            "stop_dist": np.nan, "eff_mult": round(eff_mult, 4) if signal == "BUY" else np.nan,
         }
         if sizing:
             row.update({k: sizing[k] for k in
                         ["entry", "stop", "target", "shares", "pos_value_usd",
-                         "risk_usd", "risk_gbp", "binding"]})
+                         "risk_usd", "risk_gbp", "binding", "stop_dist"]})
         rows.append(row)
 
     df = pd.DataFrame(rows)
     if df.empty:
         return df
+    return _select_portfolio(df, prices, cfg, cfg.max_positions, cfg.capital_gbp)
 
-    # Portfolio selection: top BUY signals by rank, capped per sector so 8 slots aren't
-    # secretly one bet (e.g. all semiconductors).
+
+def _select_portfolio(df, prices, cfg, max_positions, capital_gbp):
+    """Fill up to `max_positions` slots from the BUY signals by rank, subject to the sector cap,
+    the portfolio-heat ceiling (scaled by `capital_gbp`), and the correlation cap. Sets `selected`.
+    Split out from build_signals so the dashboard what-if can re-select for a different slot
+    count / capital without re-running the whole engine."""
+    df = df.copy()
     df["selected"] = False
     sector_count = {}
     chosen = 0
     heat_gbp = 0.0
-    heat_cap_gbp = cfg.max_portfolio_heat * cfg.capital_gbp  # total £-at-risk ceiling
+    heat_cap_gbp = cfg.max_portfolio_heat * capital_gbp  # total £-at-risk ceiling
     # C2: return-correlation matrix over the BUY candidates, to avoid stacking one macro bet.
     corr = _return_corr(prices, df[df["signal"] == "BUY"]["ticker"].tolist(), cfg.corr_window)
     picked = []
     for i, r in df[df["signal"] == "BUY"].sort_values("rank").iterrows():
-        if chosen >= cfg.max_positions:
+        if chosen >= max_positions:
             break
         sec = r.get("sector", "Unknown")
         if sector_count.get(sec, 0) >= cfg.max_per_sector:
             continue  # sector full — skip to keep the portfolio diversified
-        r_gbp = float(r.get("risk_gbp") or 0)
+        _rg = r.get("risk_gbp")
+        r_gbp = float(_rg) if pd.notna(_rg) else 0.0
+        if r_gbp <= 0:
+            continue  # unsized (too small at this capital/slot) — can't take it
         if heat_cap_gbp and heat_gbp + r_gbp > heat_cap_gbp:
             continue  # would breach the portfolio-heat ceiling — skip (a smaller pick may still fit)
         t = r["ticker"]
@@ -366,3 +378,41 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
         picked.append(t)
         chosen += 1
     return df
+
+
+def resize_and_select(sig, prices, cfg, capital_gbp, max_positions, fx_rate):
+    """What-if recompute: re-size every BUY and re-pick the portfolio for a different trading
+    capital / slot count, using the already-computed signals. It touches ONLY sizing (shares, £
+    risk, position value) and selection — the BUY/HOLD/SELL call, conviction, stop and target are
+    capital-independent and left untouched, and nothing is written to the DB or the ledger.
+
+    Relies on the `stop_dist` + `eff_mult` helper columns; if they're absent (signals produced
+    before this feature) the frame is returned unchanged so the caller can prompt for a refresh."""
+    df = sig.copy()
+    if df.empty or "stop_dist" not in df.columns or "eff_mult" not in df.columns:
+        return df
+    max_positions = max(1, int(max_positions))
+    risk_usd = capital_gbp * cfg.risk_per_trade * fx_rate       # per-trade £ risk, in USD
+    per_pos_cap = (capital_gbp * fx_rate) / max_positions       # equal-weight capital slot
+    for i, r in df.iterrows():
+        if r.get("signal") != "BUY":
+            continue
+        entry = float(r.get("entry") or 0)
+        sd = float(r.get("stop_dist") or 0)
+        if entry <= 0 or sd <= 0:
+            continue
+        eff = float(r["eff_mult"]) if pd.notna(r.get("eff_mult")) else 1.0
+        shares_by_risk = risk_usd / sd
+        shares_by_cap = per_pos_cap / entry
+        shares = int(math.floor(min(shares_by_risk, shares_by_cap)))   # base sizing
+        if eff < 1.0:                                                  # apply the stored multiplier
+            shares = int(math.floor(shares * eff))
+        if shares < 1:                                                 # too small to size here
+            df.loc[i, ["shares", "pos_value_usd", "risk_usd", "risk_gbp"]] = np.nan
+            continue
+        df.loc[i, "shares"] = shares
+        df.loc[i, "pos_value_usd"] = round(shares * entry, 0)
+        df.loc[i, "risk_usd"] = round(shares * sd, 0)
+        df.loc[i, "risk_gbp"] = round(shares * sd / fx_rate, 0)
+        df.loc[i, "binding"] = "risk" if shares_by_risk <= shares_by_cap else "capital"
+    return _select_portfolio(df, prices, cfg, max_positions, capital_gbp)

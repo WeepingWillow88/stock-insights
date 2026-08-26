@@ -44,6 +44,15 @@ def _env_float(key, default):
         return float(default)
 
 
+def _env_int(key, default):
+    """Read an int from the environment, falling back to `default` if unset, blank, or unparseable
+    (a stray MAX_POSITIONS repo variable shouldn't crash the pipeline). Floats are truncated."""
+    try:
+        return int(float(_os.environ[key]))
+    except (KeyError, ValueError, TypeError):
+        return int(default)
+
+
 @dataclass
 class Config:
     # --- Portfolio / risk (from user) ---
@@ -52,7 +61,9 @@ class Config:
     # the % deployed / cash-free tiles all recompute on the next refresh run.
     capital_gbp: float = _env_float("CAPITAL_GBP", 50_000.0)
     risk_per_trade: float = 0.015           # 1.5%
-    max_positions: int = 8
+    # Max concurrent positions. Defaults to 8; set MAX_POSITIONS (in .env / a repo variable) to
+    # change the automated run in one place. The dashboard also offers a session-only what-if.
+    max_positions: int = _env_int("MAX_POSITIONS", 8)
     max_portfolio_heat: float = 0.12        # positions * risk/trade guardrail
 
     # --- Benchmark ---

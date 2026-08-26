@@ -237,16 +237,43 @@ with st.sidebar:
              "in an uptrend rather than falling.")
     st.markdown("---")
     st.header("Your money & safety limits")
-    st.write(f"Money to trade: **£{CONFIG.capital_gbp:,.0f}**")
-    st.write(f"Most you'll risk per trade: **{CONFIG.risk_per_trade * 100:.1f}%** "
-             f"(~£{CONFIG.capital_gbp * CONFIG.risk_per_trade:,.0f})")
-    st.caption("This is the maximum you'd *lose* on one trade if its stop-loss is hit — "
-               "not how much you put in.")
-    st.write(f"Max positions at once: **{CONFIG.max_positions}**")
-    st.write(f"Total-risk ceiling: **{CONFIG.max_portfolio_heat * 100:.0f}%** of your money")
-    st.caption("('Heat' = everything at risk across all open trades combined.)")
-    st.write(f"£→$ rate used: **{fx_rate:.4f}**")
+    st.session_state.setdefault("wf_capital", float(CONFIG.capital_gbp))
+    st.session_state.setdefault("wf_maxpos", int(CONFIG.max_positions))
+    with st.form("wf_form"):
+        st.number_input(
+            "Money to trade (£)", min_value=1000.0, step=1000.0, format="%.0f", key="wf_capital",
+            help="Your total trading pot. Change it and hit Recalculate — the shares, £-at-risk per "
+                 "trade, the total-risk cap and the deployed / cash-free tiles all recompute.")
+        st.number_input(
+            "Max positions at once", min_value=1, max_value=30, step=1, key="wf_maxpos",
+            help="Most stocks to hold at once. Fewer = each position is bigger; more = each is "
+                 "smaller (the pot is split into that many equal slots).")
+        _recalced = st.form_submit_button("♻️ Recalculate", use_container_width=True)
+    eff_capital = float(st.session_state["wf_capital"])
+    eff_maxpos = int(st.session_state["wf_maxpos"])
+    st.caption(f"Most you'll risk per trade: **{CONFIG.risk_per_trade * 100:.1f}%** "
+               f"(~£{eff_capital * CONFIG.risk_per_trade:,.0f}) — the most you'd *lose* if a "
+               "stop-loss is hit, not how much you put in.")
+    st.caption(f"Total-risk ceiling: **{CONFIG.max_portfolio_heat * 100:.0f}%** of your money "
+               "('heat' = everything at risk across all open trades combined).")
+    st.caption(f"£→$ rate used: **{fx_rate:.4f}**")
+    _wf_changed = (eff_capital != float(CONFIG.capital_gbp)) or (eff_maxpos != int(CONFIG.max_positions))
+    if _wf_changed:
+        st.info(f"**What-if:** £{eff_capital:,.0f} / {eff_maxpos} slots. Sizing & picks below are "
+                "recalculated for these — but this is **display-only**: your track record and the "
+                "automated daily run are untouched. To make it the default, set the `CAPITAL_GBP` / "
+                "`MAX_POSITIONS` repo variables.")
     st.markdown("---")
+
+# Apply the capital / max-positions what-if to the displayed signals (offline, no re-run, no
+# ledger write). A no-op at the default settings; needs the stop_dist/eff_mult helper columns.
+if not signals_df.empty and {"stop_dist", "eff_mult"}.issubset(signals_df.columns):
+    from src import signals as _signals
+    signals_df = _signals.resize_and_select(signals_df, load_table("prices"), CONFIG,
+                                             eff_capital, eff_maxpos, fx_rate)
+elif _wf_changed:
+    st.sidebar.warning("Recalculate needs a fresh data pull first — open **📰 Macro & News → "
+                       "⬇️ Pull fresh prices**, then adjust these.")
     st.caption(f"🕒 Data last pulled: **{upd_pretty}**" + (f" ({upd_ago})" if upd_ago else ""))
     if _market_through and not pd.isna(_market_through):
         st.caption(f"Covers prices through **{_market_through}**")
@@ -264,7 +291,7 @@ with tab_sig:
         sig["selected"] = sig["selected"].astype(bool)
         selected = sig[sig["selected"]]
 
-        capital_usd = CONFIG.capital_gbp * fx_rate
+        capital_usd = eff_capital * fx_rate
         # Portfolio summary reflects your ACTUAL open holdings (the running book), NOT today's fresh
         # BUY picks — otherwise it reads £0 on a no-new-buys day while you're holding positions.
         _open = (ledger_df[ledger_df["status"] == "open"].copy()
@@ -280,9 +307,9 @@ with tab_sig:
         total_pos_gbp = total_pos_gbp / fx_rate if fx_rate else 0.0
         total_risk_gbp = (float(pd.to_numeric(_open["risk_gbp"], errors="coerce").fillna(0).sum())
                           if n_open else 0.0)
-        cash_free_gbp = max(CONFIG.capital_gbp - total_pos_gbp, 0.0)
-        deployed_pct = total_pos_gbp / CONFIG.capital_gbp * 100 if CONFIG.capital_gbp else 0
-        heat_pct = total_risk_gbp / CONFIG.capital_gbp * 100 if CONFIG.capital_gbp else 0
+        cash_free_gbp = max(eff_capital - total_pos_gbp, 0.0)
+        deployed_pct = total_pos_gbp / eff_capital * 100 if eff_capital else 0
+        heat_pct = total_risk_gbp / eff_capital * 100 if eff_capital else 0
 
         money_cfg = {
             "price": st.column_config.NumberColumn("Price", format="$%.2f",
@@ -420,15 +447,15 @@ with tab_sig:
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("New BUYs today", int(len(new_buys)),
                   help="New positions suggested to open today (after all the gates/caps).")
-        c2.metric("Positions held", f"{n_open} / {CONFIG.max_positions}",
+        c2.metric("Positions held", f"{n_open} / {eff_maxpos}",
                   help="Open positions you're currently holding, vs your maximum.")
         c3.metric("Capital deployed", f"£{total_pos_gbp:,.0f}",
-                  help=f"Value of your open holdings at the latest price — {deployed_pct:.0f}% of your £{CONFIG.capital_gbp:,.0f}.")
+                  help=f"Value of your open holdings at the latest price — {deployed_pct:.0f}% of your £{eff_capital:,.0f}.")
         c4.metric("Portfolio heat", f"£{total_risk_gbp:,.0f}",
                   help=f"£ at risk across your open positions if their stops hit — {heat_pct:.1f}% of "
                        f"capital (ceiling {CONFIG.max_portfolio_heat*100:.0f}%). Money *at risk*, not invested.")
         c5.metric("Cash free", f"£{cash_free_gbp:,.0f}", help="Uninvested cash.")
-        st.caption(f"**{deployed_pct:.0f}%** of your £{CONFIG.capital_gbp:,.0f} deployed across "
+        st.caption(f"**{deployed_pct:.0f}%** of your £{eff_capital:,.0f} deployed across "
                    f"**{n_open}** open position(s) · **{heat_pct:.1f}%** at risk "
                    f"(cap {CONFIG.max_portfolio_heat*100:.0f}%) · **{max(100 - deployed_pct, 0):.0f}%** in cash.")
 
@@ -1258,11 +1285,16 @@ moves are close to random; the discipline (stops, sizing, diversification) is wh
         {"Setting": "Min confidence to buy", "Now": f"{c.min_conviction}%",
          "What it does": "A BUY must clear this + beat the S&P + above-average volume"},
         {"Setting": "Max positions", "Now": str(c.max_positions),
-         "What it does": "Most trades held at once"},
+         "What it does": "Most trades held at once (set MAX_POSITIONS, or use the sidebar what-if)"},
         {"Setting": "Trading capital", "Now": f"£{c.capital_gbp:,.0f}",
-         "What it does": "Total money position sizing is based on (set CAPITAL_GBP to change it)"},
+         "What it does": "Total money position sizing is based on (set CAPITAL_GBP, or use the sidebar what-if)"},
     ])
     st.dataframe(params, width="stretch", hide_index=True)
+    st.caption("💡 **Try different numbers live:** the sidebar's *Money to trade* and *Max positions "
+               "at once* inputs + **♻️ Recalculate** re-size every BUY and re-pick the portfolio "
+               "instantly — a display-only what-if that leaves your track record and the automated "
+               "daily run untouched. Set the `CAPITAL_GBP` / `MAX_POSITIONS` repo variables to make "
+               "a value the permanent default the daily refresh uses.")
     st.caption("Want a change? Just tell me e.g. \"only show beta ≥ 2\", \"use a 3×ATR stop\", "
                "or \"risk 1% per trade\" — I'll update `src/config.py` and re-run.")
     st.info("These are **rules-based** signals from price data, with a news/sentiment layer that "
