@@ -167,7 +167,7 @@ rules, the sizing maths, and how the daily refresh works.
 | **Confidence %** | How many independent checks agree (trend, momentum, RSI, news). A BUY must clear a minimum bar |
 | **RSI / "momentum"** | 0–100 gauge. >70 overheated, <30 beaten-down; 45–65 is the healthy buy zone |
 | **Daily swing (ATR)** | Typical size of a day's move — sets how wide the safety-exit sits |
-| **News mood** | 🔴/⚪/🟢 read of recent headlines (sources incl. **CNBC**; engine shown on the Macro & News tab) |
+| **News mood** | 🔴/⚪/🟢 read from **StockTwits** crowd bull/bear tags; the day's actionable names also get **Alpha Vantage** article-level news (see the Macro & News tab) |
 | **Post-earnings drift** | After a stock reports, a big beat the market gapped up on tends to keep drifting up for weeks (a big miss keeps sinking). Nudges Confidence up/down; a strong down-gap blocks a fresh BUY |
 | **Short interest** | Shares bet against the stock, as % of float. High = squeeze fuel but crowded |
 | **Implied vol (IV)** | The move options are pricing in. IV well above recent *realized* moves = event brewing |
@@ -653,9 +653,12 @@ with tab_news:
     else:
         _srcmode = news_df["source"].mode() if "source" in news_df.columns else pd.Series([], dtype=object)
         src = _srcmode.iloc[0] if not _srcmode.empty else "?"
-        st.caption(f"Each stock's recent headlines (Finnhub / Google News, with **CNBC** always "
-                   f"included), scored for a short-term trader (sentiment engine: **{src}**). "
-                   f"Expand a stock to read the headlines yourself.")
+        st.caption("**Crowd mood** for every name comes from **StockTwits** bull/bear tags "
+                   "(what traders are actually saying — not headline snippets). For the day's "
+                   "**actionable names** (BUY candidates + holdings) we *double down* with "
+                   "**Alpha Vantage** article-level news sentiment (the *Article news* column). "
+                   f"Fallback engine when the crowd is quiet: FinBERT → keywords (mostly **{src}** "
+                   "today). Expand a stock to read the posts/headlines yourself.")
         only = st.radio("Show", ["All", "Only negative", "Only positive"],
                         horizontal=True, label_visibility="collapsed")
         view = news_df.copy()
@@ -671,15 +674,29 @@ with tab_news:
 
         summary = view.copy()
         summary["sentiment_label"] = summary["label"].map(NEWS_EMOJI).fillna(summary["label"])
+
+        def _av_cell(r):
+            if "av_label" not in r or pd.isna(r.get("av_label")) or not r.get("av_label"):
+                return "—"
+            sc = r.get("av_score")
+            return f"{r['av_label']} ({float(sc):+.2f})" if pd.notna(sc) else str(r["av_label"])
+        summary["av_display"] = summary.apply(_av_cell, axis=1)
+
         st.dataframe(
             summary[["ticker", "sentiment_label", "sentiment", "materiality",
-                     "macro_driver", "rationale"]],
+                     "av_display", "source", "rationale"]],
             width="stretch", hide_index=True,
             column_config={
-                "sentiment_label": st.column_config.TextColumn("News"),
+                "sentiment_label": st.column_config.TextColumn("Crowd mood"),
                 "sentiment": st.column_config.NumberColumn("Score", format="%.2f",
-                             help="-1 very negative … +1 very positive"),
-                "macro_driver": st.column_config.TextColumn("Driver"),
+                             help="Crowd bull/bear balance: -1 very bearish … +1 very bullish"),
+                "av_display": st.column_config.TextColumn("Article news (AV)",
+                             help="Alpha Vantage article-level news sentiment, shown for the day's "
+                                  "actionable names (BUY candidates + holdings). '—' = not scored "
+                                  "(only the actionable subset is, to stay within the free tier)."),
+                "source": st.column_config.TextColumn("Engine",
+                             help="How the crowd/text score was produced: stocktwits (crowd tags), "
+                                  "finbert (finance model on headlines), or keywords (fallback)."),
                 "rationale": st.column_config.TextColumn("Plain-English read", width="large"),
             })
         st.markdown("#### Dig into the headlines")
@@ -782,12 +799,6 @@ with tab_track:
         c[3].metric("Avg win / loss", f"{ls['avg_win_r']:+.1f}R / {ls['avg_loss_r']:+.1f}R")
         c[4].metric("Total", f"{ls['total_r']:+.1f}R")
         st.caption(ls.get("note", ""))
-        # D3: let the live results referee the backtest
-        if not bt_summary_df.empty and pd.notna(bt_summary_df.iloc[0].get("expectancy_r")):
-            _bt = float(bt_summary_df.iloc[0]["expectancy_r"])
-            st.caption(f"📏 **Live vs backtest:** live is **{ls['expectancy_r']:+.2f}R/trade** vs the "
-                       f"backtest's **{_bt:+.2f}R**. Over enough live trades these should converge — a "
-                       "big, persistent gap means the edge is decaying (or the live sample is still tiny).")
 
     if not ledger_df.empty:
         opn = ledger_df[ledger_df["status"] == "open"]
@@ -1155,20 +1166,22 @@ one of three regimes:
 This is exactly the "Micron dips on inflation/Iran news but recovers" instinct, encoded:
 the app won't pile into high beta into a CPI print or a risk-off tape.
 
-**Layer C — news sentiment (live).** For each shortlist stock the app pulls recent
-headlines (Finnhub / Google News, with **CNBC** coverage always blended in) and scores
-them for a short-term trader — sentiment (−1…+1), a plain-English
-read, the macro driver (inflation/rates/geopolitical/earnings), and an action bias. A
-**strongly negative, material** news read turns a 🟢 BUY into a 🟡 HOLD; milder concerns
-get flagged. Scoring uses the best engine available, in order: the **Claude API**
-(`{c.claude_model}`, when `ANTHROPIC_API_KEY` / `ant auth login` is set) → **FinBERT**, a
-free finance-trained model that runs locally (when installed) → a simple **keyword** scan —
-so it always runs. The active engine is labelled on the Macro & News tab. To keep AI cost
-predictable, the **Claude scoring runs on the twice-daily schedule** and only for the names a
-headline can actually move — today's **BUY candidates** and your **open positions**; every other
-name takes the free keyword scan (its news can't flip a non-candidate into a trade). The on-demand
-refresh buttons **reuse** that latest scored read rather than paying to re-score. All of this is
-compiled in the **📰 Macro & News tab**.
+**Layer C — sentiment (live).** For **every** shortlist stock the app reads **StockTwits crowd
+sentiment** — the bull/bear tags traders attach to their posts. That's a *market-mood* signal, not
+a headline-snippet guess, which is the right read for jumpy, retail-driven high-beta names and costs
+nothing. It produces a sentiment (−1…+1), a materiality, and an action bias; a **strongly negative,
+material** read turns a 🟢 BUY into a 🟡 HOLD. When the crowd is too quiet to trust, it falls back to
+**FinBERT** (a finance-trained model on the headlines, when installed) → a **keyword** scan.
+
+To *double down* on the day's decisions, the **actionable names only** — today's **BUY candidates**
+and your **open positions** — additionally get **Alpha Vantage** article-level news sentiment
+(`ALPHAVANTAGE_API_KEY`), which scores the *full article* server-side (with a relevance weight, so a
+stock merely mentioned doesn't skew it). It can only *tighten* caution — a bearish article read can
+downgrade a BUY, but news never fabricates one. Alpha Vantage's free tier is 25 calls/day, so it
+runs **once daily** (the pre-close run) and is budget-capped; the on-demand refresh buttons **reuse**
+the latest scored read. (Claude headline scoring is retired here — the configured key routed via an
+internal gateway that couldn't authenticate from the cloud.) All of this is compiled in the
+**📰 Macro & News tab**.
 
 **Layer D — options & short interest.** Two extras that move high-beta names hard, shown in the
 **🔎 Squeeze & volatility watch** table and as **flags**:
@@ -1236,16 +1249,18 @@ Keys live in a local `.env` (or the hosted app's GitHub Action secrets) — neve
 |---|---|---|---|
 | **Prices** (signals, regime, backtest) | yfinance — free, unofficial | — | Accurate & fine. A paid feed (Polygon/Tiingo) only matters for *reliability* if this ever drives real money |
 | **Market backdrop / regime** | yfinance: SPY, QQQ, VIX, SMH, US 10-yr, HYG credit + breadth | — | **Strong as-is — no paid source needed.** Well-diversified multi-factor read |
-| **Per-stock news** | Google News RSS *titles* → **Finnhub** company-news (`FINNHUB_API_KEY`) — headline + summary + source, screener-noise filtered — plus **CNBC** headlines blended in (site-restricted Google News RSS, no key) | Finnhub **free** tier | Finnhub free is enough; the app drops generic "most-active" aggregator spam, always surfaces CNBC coverage, and falls back to RSS if too few real items remain |
-| **News sentiment** | keyword scan → local **FinBERT** → **Claude** (`ANTHROPIC_API_KEY`, `{c.claude_model}`) | Claude (pennies/run) | **Biggest free-ish win: set `ANTHROPIC_API_KEY`.** Claude reads the *reaction* in market context; keywords can't |
+| **Crowd sentiment** (every name) | **StockTwits** public stream — traders' Bullish/Bearish tags | — (free, no key) | **Free and context-independent** — reads market mood directly, ideal for high-beta/retail names. Best-effort public endpoint; falls back to FinBERT/keywords if a name is quiet |
+| **Article-level news** (actionable names) | **Alpha Vantage** `NEWS_SENTIMENT` (`ALPHAVANTAGE_API_KEY`) — per-ticker score over the *full article* + relevance weight | free tier ~25/day (rotate several free keys) → premium ~$50/mo | Scores whole articles, not snippets. Free tier covers the day's BUY candidates + holdings once daily; premium (or more free keys) lifts the cap |
+| **Sentiment fallback** | local **FinBERT** (finance-trained) → **keyword** scan | — | Only used when StockTwits is quiet. Claude headline scoring retired (internal-gateway key 401s from the cloud) |
 | **Macro calendar** (CPI/FOMC/jobs) | curated seeded list (`events.py`) | **FMP** economic-calendar (`FMP_API_KEY`, **paid tier only**) | **The one thing worth paying for.** Free FMP/Finnhub tiers 402 here; the seeded list works but must be kept current |
 | **Earnings dates** | **FMP** earnings-calendar (free, where it has the name) → yfinance fallback | FMP paid = full coverage | Free tier samples a subset, so it *supplements* yfinance rather than replacing it |
 | **Post-earnings drift** | yfinance earnings dates + surprise, drift read from our own price bars | Paid earnings feed = cleaner dates/surprises | Momentum-aligned tilt; best-effort dates, not in the backtest |
 | **Options IV · short interest · analyst revisions** | yfinance best-effort | — | Informational flags only; a paid options/estimate-revisions feed would sharpen them |
 
-**Bottom line:** the market backdrop is solid on free data. The single largest accuracy gain is
-adding `ANTHROPIC_API_KEY` (near-free) so news is *read*, not keyword-counted. The only source
-genuinely worth *paying* for is a real macro/econ calendar (upgrade FMP or Finnhub premium).
+**Bottom line:** the market backdrop and sentiment now run entirely on **free** sources — StockTwits
+crowd mood for every name, plus Alpha Vantage article-level news (free key) on the day's actionable
+picks. The only source genuinely worth *paying* for is a real macro/econ calendar (upgrade FMP or
+Finnhub premium); Alpha Vantage premium is a distant second if you outgrow the free 25/day news cap.
 
 ---
 """

@@ -117,8 +117,17 @@ class Config:
     earnings_lookahead_days: int = 14   # window to flag upcoming earnings
 
     # --- News sentiment (Phase 3, Layer C) ---
-    use_claude_news: bool = True          # use Claude API; falls back to FinBERT then keywords
-    use_finbert: bool = True              # use local FinBERT if installed (no key needed)
+    # Sentiment stack: StockTwits crowd tags for every name (free, no key, and context-independent
+    # — it reads market mood, not headline snippets), then Alpha Vantage article-level news on the
+    # day's actionable names to 'double down', with FinBERT -> keywords as the fallback.
+    use_stocktwits: bool = True           # primary: StockTwits crowd bull/bear tags (free, no key)
+    stocktwits_min_tags: int = 3          # need at least this many tagged posts to trust the crowd read
+    use_alpha_vantage: bool = True        # article-level confirmation on actionable names (needs key)
+    av_max_calls_per_run: int = 20        # cap AV calls/run — stays under the free 25/day (run 1x/day)
+    use_claude_news: bool = False         # OFF: the configured key routes via a Salesforce-internal
+    #                                       gateway that 401s from CI/Streamlit, so it silently fell
+    #                                       back to keywords anyway. StockTwits/AV replace it.
+    use_finbert: bool = True              # fallback: local FinBERT if installed (no key needed)
     claude_model: str = "claude-haiku-4-5"  # cheap headline classification within budget;
     #                                         swap to "claude-opus-5" for maximum quality
     news_headlines: int = 8               # headlines/news items pulled per ticker

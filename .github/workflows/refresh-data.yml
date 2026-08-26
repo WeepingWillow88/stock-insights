@@ -104,6 +104,9 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}   # optional; real econ calendar (paid FMP plan)
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}  # optional; richer stock news (free tier)
+          # Alpha Vantage article-level news sentiment for the day's actionable names. Comma-separate
+          # several free keys in the secret to rotate past the 25/day-per-key cap.
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
           RUN_KIND: ${{ steps.gate.outputs.kind }}  # 'pre-open' / 'pre-close' / 'manual' (shown in-app)
         run: python -m src.pipeline
 

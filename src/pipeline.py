@@ -140,6 +140,8 @@ def _macro_news_frames(reg, macro_events, news_map, run_date):
         {"ticker": t, "label": v.get("label"), "sentiment": v.get("sentiment"),
          "materiality": v.get("materiality"), "macro_driver": v.get("macro_driver"),
          "action_bias": v.get("action_bias"), "source": v.get("source"),
+         "av_score": v.get("av_score"), "av_label": v.get("av_label"),
+         "av_articles": v.get("av_articles"),
          "rationale": v.get("rationale"), "headlines": " || ".join(v.get("headlines", [])),
          "run_date": run_date}
         for t, v in news_map.items()
@@ -161,6 +163,8 @@ def _load_news_map(cfg):
             "label": r.get("label"), "sentiment": r.get("sentiment"),
             "materiality": r.get("materiality"), "macro_driver": r.get("macro_driver"),
             "action_bias": r.get("action_bias"), "source": r.get("source"),
+            "av_score": r.get("av_score"), "av_label": r.get("av_label"),
+            "av_articles": r.get("av_articles"),
             "rationale": r.get("rationale"),
             "headlines": [h for h in raw.split(" || ") if h],
         }
@@ -177,8 +181,13 @@ def _news_map_for(cfg, prices, shortlist, reg_label, reuse_news):
             return cached, 0
         # No cached news yet (first ever run) -> fall through and score fresh.
     smart = signals.technical_buy_candidates(prices, shortlist, cfg) | ledger.open_tickers(cfg)
+    # Alpha Vantage (article-level) only 'doubles down' on the day's actionable names, and its free
+    # tier is 25 calls/day — so run it once daily (skip the pre-open morning run; the pre-close /
+    # manual run does it). StockTwits still scores every name on every run regardless.
+    run_kind = os.environ.get("RUN_KIND", "").lower()
+    use_av = cfg.use_alpha_vantage and "pre-open" not in run_kind
     nm = news.build_news_map(shortlist["ticker"].tolist(), cfg, prices, reg_label,
-                             smart_tickers=smart)
+                             smart_tickers=smart, use_av=use_av)
     return nm, len(smart)
 
 

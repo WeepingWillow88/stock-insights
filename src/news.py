@@ -1,19 +1,25 @@
-"""Layer C: news ingestion + sentiment.
+"""Layer C: sentiment for the high-beta shortlist.
 
-Pulls recent headlines per ticker from free RSS (Google News) and scores them for
-a short-term high-beta trader. Uses the Claude API when credentials are available
-(ANTHROPIC_API_KEY or an `ant auth login` profile) and falls back to a transparent
-keyword scorer otherwise — so the app always runs.
+Primary read is **StockTwits** crowd sentiment (bull/bear tags) for every name — a market-mood
+signal that needs no key and doesn't depend on headline text, which suits jumpy retail-driven
+names. When the crowd is too quiet it falls back to **FinBERT** (finance model on headlines, if
+installed) then a **keyword** scan, so the app always runs. Headlines themselves (Finnhub / Google
+News / CNBC) are still fetched for the "dig into the headlines" view and the text fallback.
+
+For the day's **actionable** names (BUY candidates + holdings) the read is reinforced with
+**Alpha Vantage** article-level news sentiment (see av.py) — it can only *tighten* caution, never
+create a BUY. (Claude headline scoring is retired here; see config.use_claude_news.)
 
 Output per ticker:
-  sentiment    float  -1 (very negative) .. +1 (very positive)
+  sentiment    float  -1 (very bearish) .. +1 (very bullish)
   label        negative | neutral | positive
   materiality  low | medium | high
   macro_driver inflation | rates | geopolitical | earnings | company_specific | none
   action_bias  none | caution_hold | avoid   (avoid can turn a BUY into a HOLD)
   rationale    one-line plain-English explanation
-  source       claude | keywords
-  headlines    the raw headlines (so the reader can dig in)
+  source       stocktwits | finbert | keywords | none
+  av_score/av_label/av_articles  Alpha Vantage read (actionable names only; absent otherwise)
+  headlines    recent posts / headlines (so the reader can dig in)
 """
 import datetime as dt
 import html
@@ -373,24 +379,111 @@ def _price_context(prices, ticker, regime_label, window=5):
     return "; ".join(parts)
 
 
-def build_news_map(tickers, cfg, prices=None, regime_label=None, smart_tickers=None):
-    """Return {ticker: {sentiment, label, ..., headlines}} for each ticker. When prices/regime are
-    supplied, the smart engine (Claude) also gets each stock's recent move + the regime as context.
+def _stocktwits_stream(ticker):
+    """Recent messages for a ticker from StockTwits' public stream (free, no key). Returns the
+    raw message list, or None on any failure (HTTP error / rate-limit / no such symbol)."""
+    url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+    try:
+        r = requests.get(url, headers=_HEADERS, timeout=15)
+        if r.status_code != 200:
+            return None
+        msgs = r.json().get("messages")
+        return msgs or None
+    except Exception:  # noqa: BLE001
+        return None
 
-    `smart_tickers`: if given, ONLY those names are scored with the configured engine (Claude /
-    FinBERT); every other name gets the free keyword scan. News only changes a decision for BUY
-    candidates and current holdings, so this focuses the paid scoring there and cuts cost sharply.
-    `smart_tickers=None` scores every name with the configured engine (backward-compatible)."""
+
+def score_with_stocktwits(msgs, cfg):
+    """Crowd sentiment from StockTwits: tally the Bullish/Bearish tags traders attach to their posts.
+    This is a *market-mood* read (not article text), so it sidesteps the 'headline lacks context'
+    problem entirely — and it's the right signal for high-beta, retail-driven names. Returns the
+    standard sentiment dict plus a few recent post bodies as 'headlines', or None if too few people
+    have tagged a view to trust it (caller then falls back to the text scorers)."""
+    bull = bear = 0
+    samples = []
+    for m in msgs:
+        basic = (m.get("entities", {}).get("sentiment") or {}).get("basic")
+        if basic == "Bullish":
+            bull += 1
+        elif basic == "Bearish":
+            bear += 1
+    tagged = bull + bear
+    if tagged < cfg.stocktwits_min_tags:
+        return None
+    for m in msgs[:cfg.news_headlines]:
+        body = " ".join(str(m.get("body", "")).split()).strip()
+        if body:
+            samples.append(f"{body[:200]} [StockTwits]")
+    s = round((bull - bear) / tagged, 2)
+    label = "neutral" if abs(s) < 0.2 else ("positive" if s > 0 else "negative")
+    materiality = "high" if tagged >= 15 else ("medium" if tagged >= 6 else "low")
+    if s <= -0.5 and tagged >= 8:
+        bias = "avoid"
+    elif s < 0:
+        bias = "caution_hold"
+    else:
+        bias = "none"
+    return {"sentiment": s, "label": label, "materiality": materiality,
+            "macro_driver": "none", "action_bias": bias,
+            "rationale": (f"StockTwits crowd: {bull} bullish vs {bear} bearish tags across "
+                          f"{len(msgs)} recent posts (net {s:+.2f})."),
+            "source": "stocktwits", "headlines": samples}
+
+
+def _apply_av(base, av):
+    """Fold an Alpha Vantage article-level read into a name's sentiment. News can only *tighten*
+    caution here (it must never fabricate a BUY), so a bearish AV read strengthens the action_bias;
+    otherwise it just annotates the rationale as confirmation. Stores av_* fields for the UI."""
+    base["av_score"] = av["av_score"]
+    base["av_label"] = av["av_label"]
+    base["av_articles"] = av["av_articles"]
+    if av["av_label"] == "Bearish" and base.get("action_bias") != "avoid":
+        base["action_bias"] = "avoid"
+        base["rationale"] += (f"  Alpha Vantage article-level news is Bearish "
+                              f"({av['av_score']:+.2f}) — flagged to avoid a fresh long.")
+    elif av["av_label"] == "Somewhat-Bearish" and base.get("action_bias") == "none":
+        base["action_bias"] = "caution_hold"
+        base["rationale"] += (f"  Alpha Vantage article-level news is Somewhat-Bearish "
+                              f"({av['av_score']:+.2f}).")
+    else:
+        base["rationale"] += (f"  Alpha Vantage confirms: {av['av_label']} "
+                              f"({av['av_score']:+.2f}, {av['av_articles']} articles).")
+    return base
+
+
+def _score_one(ticker, cfg, prices, regime_label):
+    """One ticker's sentiment: StockTwits crowd read first (all names), then FinBERT -> keywords on
+    the fetched headlines. Claude stays off by default (see cfg.use_claude_news)."""
+    if cfg.use_stocktwits:
+        msgs = _stocktwits_stream(ticker)
+        if msgs:
+            st = score_with_stocktwits(msgs, cfg)
+            if st:
+                return st
+    heads = fetch_headlines(ticker, cfg)
+    s = score(ticker, heads, cfg, _price_context(prices, ticker, regime_label))
+    s["headlines"] = heads
+    return s
+
+
+def build_news_map(tickers, cfg, prices=None, regime_label=None, smart_tickers=None, use_av=False):
+    """Return {ticker: {sentiment, label, ..., headlines}} for each ticker.
+
+    Sentiment for every name comes from StockTwits crowd tags (free), falling back to FinBERT then
+    a keyword scan. When `use_av` is set and ALPHAVANTAGE_API_KEY is configured, the `smart_tickers`
+    subset (BUY candidates + current holdings) additionally gets an Alpha Vantage article-level read
+    folded in to 'double down' on the day's actionable calls — budget-capped to respect AV's free
+    25/day limit (see av.build_confirmation_map). `smart_tickers=None` treats every name as smart."""
     out = {}
     for t in tickers:
-        heads = fetch_headlines(t, cfg)
-        smart = smart_tickers is None or t in smart_tickers
-        # score() already short-circuits empty headlines to a free neutral, so the non-smart branch
-        # only spends the keyword scan when there's actually something to read.
-        if smart or not heads:
-            s = score(t, heads, cfg, _price_context(prices, t, regime_label))
-        else:
-            s = score_with_keywords(heads)
-        s["headlines"] = heads
-        out[t] = s
+        out[t] = _score_one(t, cfg, prices, regime_label)
+        out[t].setdefault("headlines", [])
+
+    if use_av and cfg.use_alpha_vantage:
+        from . import av
+        targets = list(tickers) if smart_tickers is None else [t for t in tickers if t in smart_tickers]
+        av_map = av.build_confirmation_map(targets, cfg)
+        for t, a in av_map.items():
+            if t in out:
+                _apply_av(out[t], a)
     return out
