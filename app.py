@@ -1163,8 +1163,12 @@ read, the macro driver (inflation/rates/geopolitical/earnings), and an action bi
 get flagged. Scoring uses the best engine available, in order: the **Claude API**
 (`{c.claude_model}`, when `ANTHROPIC_API_KEY` / `ant auth login` is set) → **FinBERT**, a
 free finance-trained model that runs locally (when installed) → a simple **keyword** scan —
-so it always runs. The active engine is labelled on the Macro & News tab. All of this is
-compiled in the **📰 Macro & News tab**, which you can **refresh on demand** or on a schedule.
+so it always runs. The active engine is labelled on the Macro & News tab. To keep AI cost
+predictable, the **Claude scoring runs on the twice-daily schedule** and only for the names a
+headline can actually move — today's **BUY candidates** and your **open positions**; every other
+name takes the free keyword scan (its news can't flip a non-candidate into a trade). The on-demand
+refresh buttons **reuse** that latest scored read rather than paying to re-score. All of this is
+compiled in the **📰 Macro & News tab**.
 
 **Layer D — options & short interest.** Two extras that move high-beta names hard, shown in the
 **🔎 Squeeze & volatility watch** table and as **flags**:
@@ -1197,9 +1201,9 @@ the pre-earnings blackout still fires first. *(Best-effort earnings data via Yah
 layer, this live tilt is **not** in the backtest, since point-in-time historical surprises aren't
 reliably free — so treat it as a live nudge, not part of the validated edge.)*
 
-**Two refresh modes.** *Refresh macro & news* re-pulls the regime, events, earnings and news
-and rebuilds signals **on the prices already stored** — it's quick and is what the daily "did
-anything change?" check uses, but it does **not** move the market-data date. *Pull fresh prices*
+**Two refresh modes.** *Refresh signals & regime* re-pulls the regime, events and earnings and
+rebuilds signals **on the prices already stored**, reusing the latest AI-scored news — it's quick
+and does **not** move the market-data date or spend on AI. *Pull fresh prices*
 (and the full `python -m src.pipeline`) re-downloads the whole price history and recomputes
 everything — that's what advances **market data through** to the latest trading day. On the
 hosted app a **scheduled job (GitHub Actions)** runs the full pipeline twice each weekday — once
