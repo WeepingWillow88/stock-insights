@@ -106,6 +106,35 @@ def freshness(iso):
     pretty = t.strftime("%a %d %b %Y, %H:%M") if t.hour or t.minute else t.strftime("%a %d %b %Y")
     return (pretty, ago, secs > 36 * 3600)  # stale after ~1.5 days
 
+
+def intraday_stale(iso):
+    """True when it's a US trading day and the latest data is older than it should be — catches a
+    dropped/late scheduled refresh even when it's under the coarse 36h `freshness()` threshold.
+
+    The `last_updated` timestamp is naive UTC (written by the CI runner). We convert it to Eastern
+    and flag two cases, independent of any CI cron:
+      • morning miss  — market day underway (past ~10:00 ET) but the newest data is from a prior day
+      • pre-close miss — it's past ~16:20 ET but the newest data is still the morning (pre-open) run
+    Returns a short reason string (falsy when the data is as fresh as expected)."""
+    try:
+        from zoneinfo import ZoneInfo
+        t = dt.datetime.fromisoformat(str(iso))
+    except Exception:  # noqa: BLE001 - unparseable / no zoneinfo -> lean on the 36h check instead
+        return ""
+    et = ZoneInfo("America/New_York")
+    now_et = dt.datetime.now(et)
+    if now_et.weekday() >= 5:                       # weekend — no refresh expected
+        return ""
+    upd_et = t.replace(tzinfo=dt.timezone.utc).astimezone(et)
+    afternoon_cut = now_et.replace(hour=15, minute=40, second=0, microsecond=0)  # ~pre-close time
+    past_close_grace = now_et.hour > 16 or (now_et.hour == 16 and now_et.minute >= 20)  # >16:20 ET
+    if past_close_grace and upd_et < afternoon_cut:
+        return ("today's ~15-min-before-close refresh hasn't landed — you're seeing this morning's "
+                "pre-open data")
+    if now_et.hour >= 10 and upd_et.date() < now_et.date():
+        return "today's data hasn't loaded yet — you're seeing a previous day's run"
+    return ""
+
 st.title("📈 High-Beta Stock Insights")
 st.caption("Decision-support only. Not financial advice. You place every trade yourself.")
 
@@ -182,7 +211,11 @@ if _market_through and not pd.isna(_market_through):
 if _run_kind and not pd.isna(_run_kind):
     _bits.append(f"via {_run_kind}")
 _fresh_line = "  ·  ".join(_bits)
-if upd_stale:
+_intraday_reason = intraday_stale(_last_updated)
+if _intraday_reason:
+    st.error(_fresh_line + f"  —  ⚠️ **{_intraday_reason}.** A scheduled refresh was likely dropped "
+             "or delayed. Open the 📰 Macro & News tab and hit **⬇️ Pull fresh prices** to update now.")
+elif upd_stale:
     st.warning(_fresh_line + "  —  this looks **stale**; open the 📰 Macro & News tab and hit "
                "**⬇️ Pull fresh prices** (or re-run the pipeline) to advance the market-data date.")
 else:

@@ -8,14 +8,22 @@ name: Refresh market data
 # Schedule is in UTC (GitHub cron ignores DST). US market is 09:30–16:00 ET. We want two runs:
 #   • pre-open   — morning, before the 09:30 ET open
 #   • pre-close  — ~15 min before the 16:00 ET close
-# ET is UTC-4 (summer/EDT) or UTC-5 (winter/EST), so the pre-close run has one cron per season;
-# the "gate" step below runs only the one that lands in the ~15-min-before-close window and skips
-# the other, so it stays correct year-round without double runs.
+# ET is UTC-4 (summer/EDT) or UTC-5 (winter/EST), so each intent has one cron per season.
+#
+# GitHub's scheduled trigger is BEST-EFFORT: under load it delays runs by many minutes or drops
+# them entirely, with no retry — so a single pre-close cron is unreliable (see the dropped
+# 2026-08-26 afternoon run). We therefore fire SEVERAL staggered pre-close crons; the "gate" step
+# below passes only the ones that land in the pre-/post-close window (the wrong season's crons land
+# outside it and are skipped), and an idempotency check makes every attempt after the first a
+# no-op — so we get redundancy against dropped/late deliveries without double refreshes.
 on:
   schedule:
-    - cron: "45 12 * * 1-5"   # ~08:45 ET (EDT) / 07:45 ET (EST) — before the open (gate passes it)
-    - cron: "42 19 * * 1-5"   # 15:42 ET during EDT (summer) — ~15 min before the close
-    - cron: "42 20 * * 1-5"   # 15:42 ET during EST (winter) — ~15 min before the close
+    # --- pre-open (morning; the gate accepts any pre-noon ET run, so one is plenty) ---
+    - cron: "45 12 * * 1-5"    # ~08:45 ET (EDT) / 07:45 ET (EST) — before the open
+    # --- pre-close, EDT/summer: 15:20 / 15:35 / 15:50 ET (staggered redundancy) ---
+    - cron: "20,35,50 19 * * 1-5"
+    # --- pre-close, EST/winter: 15:20 / 15:35 / 15:50 ET (staggered redundancy) ---
+    - cron: "20,35,50 20 * * 1-5"
   workflow_dispatch:           # allow manual "Run workflow" from the Actions tab
 
 # Never let two refreshes run at once (they both push seed.db).
@@ -33,6 +41,8 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 30       # enough history for the gate's "already refreshed today?" check
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -40,11 +50,11 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Decide whether to run + label it (DST-aware, ~15 min before the NYSE close)
+      - name: Decide whether to run + label it (DST-aware, around the NYSE close)
         id: gate
         run: |
           python3 - <<'PY'
-          import os, datetime
+          import os, datetime, subprocess
           from zoneinfo import ZoneInfo
           now = datetime.datetime.now(ZoneInfo("America/New_York"))
           event = os.environ.get("GITHUB_EVENT_NAME", "")
@@ -52,13 +62,28 @@ jobs:
           if event == "schedule":
               if now.hour < 12:                     # the morning cron
                   kind = "pre-open"
-              else:                                  # an afternoon cron — only the right season's fires
+              else:                                  # an afternoon cron
                   close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-                  mins = (close - now).total_seconds() / 60
-                  if 2 <= mins <= 45:
-                      kind = "pre-close"
+                  mins = (close - now).total_seconds() / 60   # +ve before close, -ve after
+                  # Wide window so a delayed/early GitHub delivery still lands: 60 min before the
+                  # close through 20 min after. The wrong season's crons fire far outside this and
+                  # are skipped. Runs after the bell are still useful (final EOD prices).
+                  if -20 <= mins <= 60:
+                      kind = "pre-close" if mins >= 0 else "post-close"
                   else:
                       run = "no"
+              # Idempotency: with several staggered pre-close crons, only the FIRST that lands should
+              # do work. If today's afternoon refresh already committed seed.db, skip this attempt.
+              # Boundary = 18:00 UTC today: well after the morning run (~13 UTC), before the
+              # earliest afternoon cron (19:20 UTC), so only an afternoon refresh trips this.
+              if run == "yes" and kind in ("pre-close", "post-close"):
+                  since = now.astimezone(ZoneInfo("UTC")).replace(
+                      hour=18, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
+                  log = subprocess.run(
+                      ["git", "log", "--since", since, "--pretty=%H", "--", "data/seed.db"],
+                      capture_output=True, text=True).stdout.strip()
+                  if log:
+                      run, kind = "no", "already-refreshed"
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"run={run}\nkind={kind}\n")
           print(f"event={event} ET={now:%Y-%m-%d %H:%M} -> run={run} kind={kind}")
