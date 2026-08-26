@@ -91,7 +91,51 @@ jobs:
           git add data/seed.db
           if git diff --cached --quiet; then
             echo "No change in seed.db — nothing to commit."
+            exit 0
+          fi
+          git commit -m "chore(data): scheduled market-data refresh [skip ci]"
+          # Rebase-and-retry push. If anything else pushed to main between checkout and now
+          # (a code commit, an overlapping manual dispatch), a plain push is rejected as
+          # non-fast-forward and the refresh is silently lost. seed.db is the only file we
+          # touch, so rebasing onto the latest main is conflict-free.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "Pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt) — rebasing onto latest origin/main and retrying..."
+            git pull --rebase --autostash origin main || true
+          done
+          echo "::error::Failed to push refreshed seed.db after 5 attempts."
+          exit 1
+
+  # If the refresh above failed at any step, the app's data silently goes stale — nobody would
+  # know without checking the "as of" timestamp. Open (or bump) a GitHub issue so a missed run
+  # is visible. Skips cleanly on the gated no-op afternoon cron (that run succeeds).
+  notify-failure:
+    needs: refresh
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Open or bump a "refresh failed" issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="⚠️ Scheduled data refresh failed"
+          {
+            echo "The twice-daily market-data refresh failed, so the live app's data may be stale"
+            echo "until the next successful run. Check the failed run, then re-run it once fixed."
+            echo
+            echo "Failed run: $RUN_URL"
+          } > /tmp/body.md
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Refresh failed again — $RUN_URL"
           else
-            git commit -m "chore(data): scheduled market-data refresh [skip ci]"
-            git push
+            gh issue create --title "$title" --body-file /tmp/body.md
           fi
