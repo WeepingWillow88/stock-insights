@@ -71,6 +71,9 @@ jobs:
       - name: Run full pipeline (download prices + rebuild everything)
         if: steps.gate.outputs.run == 'yes'
         env:
+          # Trading capital in £ (optional). Set repo variable CAPITAL_GBP to size the daily run
+          # against a different budget; unset/blank falls back to the £50,000 default in config.py.
+          CAPITAL_GBP: ${{ vars.CAPITAL_GBP }}
           # Optional: set this repo secret to score news with Claude; without it the pipeline
           # falls back to a keyword scan (FinBERT is not installed in CI to keep the run light).
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

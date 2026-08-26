@@ -11,7 +11,7 @@ import os
 import pandas as pd
 
 from .config import CONFIG
-from . import (data, db, events, ledger, marketdata, metrics, news, notify, regime,
+from . import (data, db, events, ledger, marketdata, metrics, news, notify, pead, regime,
                screen, signals, universe)
 
 
@@ -77,9 +77,13 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
                   if cfg.fetch_market_extras else {})
     print(f"      market extras (IV + short interest) for {len(extras_map)} names.")
 
+    pead_map = (pead.build_pead_map(shortlist["ticker"].tolist(), prices, cfg)
+                if cfg.pead_enabled else {})
+    print(f"      post-earnings drift (PEAD) for {len(pead_map)} names.")
+
     print("      Generating signals + position sizing...")
     sig = signals.build_signals(prices, shortlist, cfg, fx_rate, reg, macro_events,
-                                earnings, news_map, extras_map)
+                                earnings, news_map, extras_map, pead_map)
     sig["run_date"] = run_date
     sig["fx_rate"] = fx_rate
     n_buy = int((sig["signal"] == "BUY").sum()) if not sig.empty else 0
@@ -169,8 +173,10 @@ def refresh_macro_news(cfg=CONFIG):
     news_map = news.build_news_map(shortlist["ticker"].tolist(), cfg, prices, reg["label"])
     extras_map = (marketdata.build_extras_map(shortlist["ticker"].tolist(), prices, cfg)
                   if cfg.fetch_market_extras else {})
+    pead_map = (pead.build_pead_map(shortlist["ticker"].tolist(), prices, cfg)
+                if cfg.pead_enabled else {})
     sig = signals.build_signals(prices, shortlist, cfg, fx_rate, reg, macro_events,
-                                earnings, news_map, extras_map)
+                                earnings, news_map, extras_map, pead_map)
     sig["run_date"] = run_date
     sig["fx_rate"] = fx_rate
 

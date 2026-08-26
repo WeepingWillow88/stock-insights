@@ -139,6 +139,7 @@ rules, the sizing maths, and how the daily refresh works.
 | **RSI / "momentum"** | 0–100 gauge. >70 overheated, <30 beaten-down; 45–65 is the healthy buy zone |
 | **Daily swing (ATR)** | Typical size of a day's move — sets how wide the safety-exit sits |
 | **News mood** | 🔴/⚪/🟢 read of recent headlines (sources incl. **CNBC**; engine shown on the Macro & News tab) |
+| **Post-earnings drift** | After a stock reports, a big beat the market gapped up on tends to keep drifting up for weeks (a big miss keeps sinking). Nudges Confidence up/down; a strong down-gap blocks a fresh BUY |
 | **Short interest** | Shares bet against the stock, as % of float. High = squeeze fuel but crowded |
 | **Implied vol (IV)** | The move options are pricing in. IV well above recent *realized* moves = event brewing |
 | **R (risk multiple)** | Track-record unit: +1R = made what you risked, −1R = hit your stop |
@@ -283,9 +284,16 @@ with tab_sig:
                           "45–65 is the healthy zone the app buys in."),
             "news": st.column_config.TextColumn("News mood",
                      help="How recent headlines read for this stock (see the Macro & News tab)."),
+            "pead": st.column_config.TextColumn("Post-earnings",
+                     help="Post-earnings drift: after a stock reports, a big beat the market "
+                          "rewarded with a gap-up tends to keep drifting up for weeks (and a big "
+                          "miss keeps sinking). 'positive' nudges Confidence up; 'negative' nudges "
+                          "it down, and a strong down-gap blocks a fresh BUY. Blank = no recent "
+                          "report or the reaction was too small to matter."),
             "conviction": st.column_config.NumberColumn("Confidence", format="%d%%",
                      help="How many independent checks agree (trend, medium- & short-term "
-                          "momentum, healthy RSI, news not against it). Higher = more sure."),
+                          "momentum, healthy RSI, news not against it), then nudged up or down for "
+                          "a fresh post-earnings drift. Higher = more sure."),
             "sector": st.column_config.TextColumn("Sector",
                      help="Industry group. The portfolio caps how many picks come from one "
                           "sector so your positions aren't secretly one big bet."),
@@ -419,7 +427,8 @@ with tab_sig:
                       "differ from today's fresh signal on the left.")
 
         acols = ["rank", "ticker", "signal", "conviction", "beta", "price", "stop",
-                 "target", "shares", "pos_value_usd", "risk_gbp", "news", "ledger", "flags", "reason"]
+                 "target", "shares", "pos_value_usd", "risk_gbp", "news", "pead", "ledger",
+                 "flags", "reason"]
         acols = [c for c in acols if c in view.columns]
         st.dataframe(view[acols], width="stretch", hide_index=True, column_config=money_cfg)
         st.caption("Sizing (shares/stop/target/risk) is shown for BUY signals only. "
@@ -1108,6 +1117,23 @@ compiled in the **📰 Macro & News tab**, which you can **refresh on demand** o
 
 These are **informational** — they flag a name and inform sizing, but don't by themselves block a BUY.
 
+**Layer E — post-earnings drift (PEAD).** Layer B keeps the app *out* of a stock right before it
+reports (the print is a coin-flip). This layer handles the *other* side of the event: once a stock
+**has** reported, a strong beat the market rewarded with a **gap-up** tends to keep drifting up for
+weeks — and a big miss keeps bleeding. It's one of the most durable anomalies in markets, and it's
+**momentum-aligned** (it rewards a move that already happened, not a bet on an unknown result). The
+app reads the drift from the **price reaction** (the 2-session move around the report, which already
+bakes in the beat/miss *and* the guidance), using the reported EPS surprise only for labelling:
+- A **positive** drift within the last **{c.pead_drift_days} days** (reaction **≥ {c.pead_min_gap*100:.0f}%**) adds
+  **+{c.pead_conviction_bonus}** to Confidence — the one place a good earnings event is *allowed* to help.
+- A **negative** drift subtracts **{c.pead_conviction_penalty}**, and a **strong** down-gap (**≥ {c.pead_strong_gap*100:.0f}%**)
+  turns a 🟢 BUY into a 🟡 HOLD outright (the drift is against a fresh long).
+
+It can only *nudge* an otherwise-valid setup — the price/trend/momentum technicals still lead, and
+the pre-earnings blackout still fires first. *(Best-effort earnings data via Yahoo; like the news
+layer, this live tilt is **not** in the backtest, since point-in-time historical surprises aren't
+reliably free — so treat it as a live nudge, not part of the validated edge.)*
+
 **Two refresh modes.** *Refresh macro & news* re-pulls the regime, events, earnings and news
 and rebuilds signals **on the prices already stored** — it's quick and is what the daily "did
 anything change?" check uses, but it does **not** move the market-data date. *Pull fresh prices*
@@ -1147,6 +1173,7 @@ Keys live in a local `.env` (or the hosted app's GitHub Action secrets) — neve
 | **News sentiment** | keyword scan → local **FinBERT** → **Claude** (`ANTHROPIC_API_KEY`, `{c.claude_model}`) | Claude (pennies/run) | **Biggest free-ish win: set `ANTHROPIC_API_KEY`.** Claude reads the *reaction* in market context; keywords can't |
 | **Macro calendar** (CPI/FOMC/jobs) | curated seeded list (`events.py`) | **FMP** economic-calendar (`FMP_API_KEY`, **paid tier only**) | **The one thing worth paying for.** Free FMP/Finnhub tiers 402 here; the seeded list works but must be kept current |
 | **Earnings dates** | **FMP** earnings-calendar (free, where it has the name) → yfinance fallback | FMP paid = full coverage | Free tier samples a subset, so it *supplements* yfinance rather than replacing it |
+| **Post-earnings drift** | yfinance earnings dates + surprise, drift read from our own price bars | Paid earnings feed = cleaner dates/surprises | Momentum-aligned tilt; best-effort dates, not in the backtest |
 | **Options IV · short interest · analyst revisions** | yfinance best-effort | — | Informational flags only; a paid options/estimate-revisions feed would sharpen them |
 
 **Bottom line:** the market backdrop is solid on free data. The single largest accuracy gain is
@@ -1200,7 +1227,7 @@ moves are close to random; the discipline (stops, sizing, diversification) is wh
         {"Setting": "Max positions", "Now": str(c.max_positions),
          "What it does": "Most trades held at once"},
         {"Setting": "Trading capital", "Now": f"£{c.capital_gbp:,.0f}",
-         "What it does": "Total money the position sizing is based on"},
+         "What it does": "Total money position sizing is based on (set CAPITAL_GBP to change it)"},
     ])
     st.dataframe(params, width="stretch", hide_index=True)
     st.caption("Want a change? Just tell me e.g. \"only show beta ≥ 2\", \"use a 3×ATR stop\", "

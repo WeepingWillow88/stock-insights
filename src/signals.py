@@ -7,7 +7,7 @@ will adjust):
   BUY   : healthy uptrend + positive momentum + RSI in a constructive band
 
 Position sizing uses the user's rules:
-  - risk per trade = 1.5% of £50,000 = £750, converted to USD
+  - risk per trade = 1.5% of capital (£750 at the default £50,000; CAPITAL_GBP override), USD
   - stop = entry - 2 x ATR   (wide stop suits high-beta swings)
   - target = entry + 2 x stop distance  (2:1 reward:risk)
   - shares = min(risk-based, equal-weight capital slot); never exceeds capital
@@ -130,6 +130,19 @@ def _conviction(ind, nws, cfg):
     return int(round(sum(bool(c) for c in checks) / len(checks) * 100))
 
 
+def _apply_pead(conviction, pead, cfg):
+    """Adjust confidence for a fresh post-earnings drift (PEAD). A positive drift ADDS conviction
+    (the one place a good earnings event is allowed to help — it's momentum-aligned); a negative
+    drift subtracts it. Clamped to 0–100 so it flows cleanly into the buy gate and edge-sizing."""
+    if not pead or not cfg.pead_enabled:
+        return conviction
+    if pead["label"] == "positive":
+        return min(100, conviction + cfg.pead_conviction_bonus)
+    if pead["label"] == "negative":
+        return max(0, conviction - cfg.pead_conviction_penalty)
+    return conviction
+
+
 def _scale_sizing(sizing, mult, fx_rate):
     """Shrink a position by a size multiplier (regime / event). None if it rounds to 0."""
     shares = int(math.floor(sizing["shares"] * mult))
@@ -160,14 +173,16 @@ def _return_corr(prices, tickers, window):
 
 
 def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=None,
-                  earnings_map=None, news_map=None, extras_map=None):
+                  earnings_map=None, news_map=None, extras_map=None, pead_map=None):
     """shortlist: DataFrame with [rank, ticker, beta]. Applies the macro layers:
     Layer A (regime gate), Layer B (earnings + macro event risk), Layer C (news),
-    plus the B2/B3 overlay (options IV + short interest) as informational flags."""
+    Layer E (post-earnings drift / PEAD), plus the B2/B3 overlay (options IV + short
+    interest) as informational flags."""
     macro_events = macro_events or []
     earnings_map = earnings_map or {}
     news_map = news_map or {}
     extras_map = extras_map or {}
+    pead_map = pead_map or {}
     regime_label = (regime or {}).get("label", "RISK-ON")
     regime_mult = (regime or {}).get("size_multiplier", 1.0)
 
@@ -187,7 +202,10 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
             continue
         signal, reason = generate_signal(ind, cfg)
         nws = news_map.get(t)
-        conviction = _conviction(ind, nws, cfg)
+        pead = pead_map.get(t)
+        # Base confidence (5 technical/news checks), then nudge for a fresh post-earnings drift so
+        # the buy gate and edge-weighted sizing both see the adjusted score.
+        conviction = _apply_pead(_conviction(ind, nws, cfg), pead, cfg)
         flags = []
 
         # Entry-quality gates — mirror the backtested rules so a live BUY == what was validated:
@@ -235,6 +253,18 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
             elif signal == "BUY" and bias == "caution_hold":
                 reason += " (news caution)"
 
+        # Layer E: post-earnings drift (PEAD). The conviction was already nudged above; here we
+        # surface it and let a *strong* negative gap veto a fresh long (drift is against it).
+        if pead and cfg.pead_enabled:
+            flags.append(pead["flag"])
+            if (signal == "BUY" and pead["label"] == "negative" and pead["strong"]
+                    and cfg.pead_avoid_downgrades_buy):
+                signal = "HOLD"
+                reason = (f"Gapped {pead['gap_ret']:+.0%} on earnings {pead['days_since']}d ago — "
+                          "post-earnings drift runs against a fresh long; ") + reason
+            elif signal == "BUY" and pead["label"] == "positive":
+                reason += " (post-earnings drift tailwind)"
+
         # Layer A: regime gate
         eff_mult = 1.0
         if signal == "BUY":
@@ -280,6 +310,10 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
             "iv_atm": ex.get("iv_atm"),
             "iv_vs_realized": ex.get("iv_vs_realized"),
             "analyst_net": ex.get("analyst_net"),
+            "pead": (pead.get("label") if pead else ""),
+            "pead_gap": (pead.get("gap_ret") if pead else np.nan),
+            "pead_surprise": (pead.get("surprise_pct") if pead else np.nan),
+            "pead_days": (pead.get("days_since") if pead else np.nan),
             "news": (news_map.get(t, {}).get("label", "") if news_map.get(t) else ""),
             "news_note": (news_map.get(t, {}).get("rationale", "")[:140] if news_map.get(t) else ""),
             "rsi": round(ind["rsi"], 0) if not np.isnan(ind["rsi"]) else np.nan,

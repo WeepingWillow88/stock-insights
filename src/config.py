@@ -1,7 +1,8 @@
 """Central configuration for the high-beta screener.
 
 All portfolio/risk parameters were set with the user:
-  - Capital: £50,000
+  - Capital: £50,000 (default) — override with the CAPITAL_GBP env var / repo variable,
+    so the app and the daily refresh both size against the same number without a code edit.
   - Risk per trade: 1.5% (~£750 max loss per trade)
   - Max concurrent positions: 8  (portfolio heat ~12%)
   - Benchmark: SPY
@@ -34,10 +35,22 @@ def _load_dotenv():
 _load_dotenv()
 
 
+def _env_float(key, default):
+    """Read a float from the environment, falling back to `default` if it is unset, blank, or
+    unparseable. Keeps a stray/empty CAPITAL_GBP repo variable from crashing the whole pipeline."""
+    try:
+        return float(_os.environ[key])
+    except (KeyError, ValueError, TypeError):
+        return float(default)
+
+
 @dataclass
 class Config:
     # --- Portfolio / risk (from user) ---
-    capital_gbp: float = 50_000.0
+    # Trading capital. Defaults to £50,000; set CAPITAL_GBP (in .env for the app, or as a repo
+    # variable wired into the daily Action) to change it in one place — sizing, the heat cap, and
+    # the % deployed / cash-free tiles all recompute on the next refresh run.
+    capital_gbp: float = _env_float("CAPITAL_GBP", 50_000.0)
     risk_per_trade: float = 0.015           # 1.5%
     max_positions: int = 8
     max_portfolio_heat: float = 0.12        # positions * risk/trade guardrail
@@ -100,10 +113,26 @@ class Config:
     news_headlines: int = 8               # headlines/news items pulled per ticker
     news_lookback_days: int = 4           # how far back to pull news
     news_avoid_downgrades_buy: bool = True  # a strongly negative news read turns BUY -> HOLD
+    use_cnbc: bool = True                 # blend in CNBC headlines (site-restricted Google News RSS,
+    #                                       no key) so that outlet is always represented per ticker
+    cnbc_headlines: int = 3               # CNBC items to surface per ticker before the rest of the feed
     # News source: Finnhub company-news (headline + summary + source, reliable ticker tagging) when
     # FINNHUB_API_KEY is set; otherwise falls back to Google News RSS titles. When use_cnbc is on,
     # CNBC headlines are blended in on top. Claude also gets the stock's recent price move + the
     # market regime as context, so it reads the *reaction*.
+
+    # --- Post-earnings drift (PEAD, Layer E: a momentum-aligned earnings tilt) ---
+    # Once a stock HAS reported, a strong beat the market rewarded with a gap tends to keep
+    # drifting the same way for weeks. Unlike the pre-earnings blackout (Layer B, which keeps us
+    # OUT before the print), this rewards a move that already happened — so it can only nudge an
+    # otherwise-valid setup, never override the technicals.
+    pead_enabled: bool = True
+    pead_drift_days: int = 14          # a past report still counts as 'fresh drift' within this many days
+    pead_min_gap: float = 0.03         # the report reaction (2-session close-to-close) must exceed ±this
+    pead_strong_gap: float = 0.07      # a reaction beyond this is 'strong' (a strong miss can veto a BUY)
+    pead_conviction_bonus: int = 10    # a positive drift adds this to the confidence score
+    pead_conviction_penalty: int = 15  # a negative drift subtracts this
+    pead_avoid_downgrades_buy: bool = True  # a strong negative post-earnings gap turns a BUY -> HOLD
 
     # --- Options-implied vol + short-interest overlays (B2 / B3, best-effort via yfinance) ---
     fetch_market_extras: bool = True      # pull IV + short interest for the shortlist each run
@@ -114,9 +143,6 @@ class Config:
     shock_move_pct: float = 0.05          # a >=5% intraday move triggers a news look
 
     # --- Backtester + track-record ledger ---
-    use_cnbc: bool = True                 # blend in CNBC headlines (site-restricted Google News RSS,
-    #                                       no key) so that outlet is always represented per ticker
-    cnbc_headlines: int = 3               # CNBC items to surface per ticker before the rest of the feed
     backtest_years: str = "10y"           # how much history to replay (incl. bear markets)
     backtest_universe_max: int = 120      # cap to the most liquid high-beta names for speed
     backtest_max_hold_days: int = 40      # backstop time exit (trailing/trend exits do the work)
