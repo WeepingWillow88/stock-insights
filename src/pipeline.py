@@ -15,11 +15,14 @@ from . import (data, db, events, ledger, marketdata, metrics, news, notify, pead
                screen, signals, universe)
 
 
-def run_pipeline(cfg=CONFIG, send_digest=True):
+def run_pipeline(cfg=CONFIG, send_digest=True, reuse_news=False):
     """Full refresh: re-download prices for the whole universe, recompute metrics,
     screen, signals, macro and news, and write everything to the DB. This is what
     advances `market_through` to the latest trading day. Set send_digest=False to
-    skip the email/notify step (used by the in-app 'Pull fresh prices' button)."""
+    skip the email/notify step (used by the in-app 'Pull fresh prices' button).
+    reuse_news=True reuses the last run's (Claude-scored) sentiment instead of a fresh
+    mass evaluation — used by the dashboard buttons so a button press costs no Claude tokens;
+    the scheduled 2x/day runs leave it False and do the real scoring."""
     # Carry over accumulated state (esp. the track-record ledger) from the shipped snapshot.
     # On the daily GitHub Action only seed.db is checked out, so without this the ledger would
     # start empty every run and never show a closed trade.
@@ -69,9 +72,11 @@ def run_pipeline(cfg=CONFIG, send_digest=True):
     print(f"      {len(earnings)} names with earnings within {cfg.earnings_lookahead_days}d.")
 
     print("      Fetching news + sentiment for shortlist...")
-    news_map = news.build_news_map(shortlist["ticker"].tolist(), cfg, prices, reg["label"])
-    src = "claude" if any(v.get("source") == "claude" for v in news_map.values()) else "keywords"
-    print(f"      scored news for {len(news_map)} names (sentiment source: {src}).")
+    news_map, n_smart = _news_map_for(cfg, prices, shortlist, reg["label"], reuse_news)
+    src = ("reused (no new Claude calls)" if reuse_news and n_smart == 0
+           else "claude" if any(v.get("source") == "claude" for v in news_map.values())
+           else "keywords")
+    print(f"      news for {len(news_map)} names — {n_smart} engine-scored (source: {src}).")
 
     extras_map = (marketdata.build_extras_map(shortlist["ticker"].tolist(), prices, cfg)
                   if cfg.fetch_market_extras else {})
@@ -142,6 +147,41 @@ def _macro_news_frames(reg, macro_events, news_map, run_date):
     return reg_row, events_df, news_df
 
 
+def _load_news_map(cfg):
+    """Reconstruct the last run's news_map from the stored `news` table. Lets the dashboard refresh
+    buttons reuse the most recent (Claude-scored) sentiment instead of re-paying for a fresh mass
+    evaluation — news moves on the 2x/day cadence, prices/signals refresh on demand."""
+    if not db.table_exists("news", cfg.db_path):
+        return {}
+    df = db.read_df("SELECT * FROM news", cfg.db_path)
+    out = {}
+    for _, r in df.iterrows():
+        raw = str(r.get("headlines") or "")
+        out[r["ticker"]] = {
+            "label": r.get("label"), "sentiment": r.get("sentiment"),
+            "materiality": r.get("materiality"), "macro_driver": r.get("macro_driver"),
+            "action_bias": r.get("action_bias"), "source": r.get("source"),
+            "rationale": r.get("rationale"),
+            "headlines": [h for h in raw.split(" || ") if h],
+        }
+    return out
+
+
+def _news_map_for(cfg, prices, shortlist, reg_label, reuse_news):
+    """News map for a run. reuse_news -> reload the last scores from the DB (no new Claude calls).
+    Otherwise score fresh, but focus the paid engine on the only names a news read can move:
+    technical BUY candidates + current holdings. Returns (news_map, engine_scored_count)."""
+    if reuse_news:
+        cached = _load_news_map(cfg)
+        if cached:
+            return cached, 0
+        # No cached news yet (first ever run) -> fall through and score fresh.
+    smart = signals.technical_buy_candidates(prices, shortlist, cfg) | ledger.open_tickers(cfg)
+    nm = news.build_news_map(shortlist["ticker"].tolist(), cfg, prices, reg_label,
+                             smart_tickers=smart)
+    return nm, len(smart)
+
+
 def _persist_signals_bundle(sig, reg_row, events_df, news_df, cfg):
     """Write the signals + regime + events + news tables (the outputs both refresh paths share)."""
     db.write_df(sig, "signals", cfg.db_path, if_exists="replace")
@@ -150,10 +190,11 @@ def _persist_signals_bundle(sig, reg_row, events_df, news_df, cfg):
     db.write_df(news_df, "news", cfg.db_path, if_exists="replace")
 
 
-def refresh_macro_news(cfg=CONFIG):
+def refresh_macro_news(cfg=CONFIG, reuse_news=False):
     """Lighter refresh used by the dashboard button and a daily cron: reuse cached
     prices, re-pull macro regime + events + earnings + news, and rebuild signals.
-    Avoids re-downloading the full universe."""
+    Avoids re-downloading the full universe. reuse_news=True skips the paid Claude news
+    scoring and reuses the last run's sentiment (dashboard button); the cron leaves it False."""
     prices = db.read_df("SELECT * FROM prices", cfg.db_path)
     shortlist = db.read_df("SELECT * FROM screen_results", cfg.db_path)
     if prices.empty or shortlist.empty:
@@ -170,7 +211,7 @@ def refresh_macro_news(cfg=CONFIG):
     macro_events = events.upcoming_macro_events(within_days=cfg.macro_event_window)
     earnings = events.earnings_dates(shortlist["ticker"].tolist(),
                                      within_days=cfg.earnings_lookahead_days)
-    news_map = news.build_news_map(shortlist["ticker"].tolist(), cfg, prices, reg["label"])
+    news_map, _ = _news_map_for(cfg, prices, shortlist, reg["label"], reuse_news)
     extras_map = (marketdata.build_extras_map(shortlist["ticker"].tolist(), prices, cfg)
                   if cfg.fetch_market_extras else {})
     pead_map = (pead.build_pead_map(shortlist["ticker"].tolist(), prices, cfg)

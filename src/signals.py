@@ -88,6 +88,20 @@ def generate_signal(ind, cfg):
     return "HOLD", "No clear setup — sideways / mixed signals"
 
 
+def technical_buy_candidates(prices, shortlist, cfg):
+    """Set of shortlist tickers whose *technical* signal (pre-news, pre-gates) is BUY — the only
+    names where a news read can flip the decision (news only downgrades BUY -> HOLD). Used to focus
+    paid Claude sentiment scoring on names that matter, letting the rest take the free keyword scan."""
+    out = set()
+    for t in shortlist["ticker"].tolist():
+        ind = _indicators(prices[prices["ticker"] == t], cfg)
+        if ind is None:
+            continue
+        if generate_signal(ind, cfg)[0] == "BUY":
+            out.add(t)
+    return out
+
+
 def size_position(entry, atr, cfg, fx_rate):
     """Return sizing dict in USD + GBP, or None if unsizable."""
     if not atr or atr <= 0 or entry <= 0:

@@ -554,18 +554,19 @@ with tab_news:
     with top[0]:
         st.subheader("Today's market picture, in plain English")
     with top[1]:
-        if st.button("🔄 Refresh macro & news", use_container_width=True,
-                     help="Re-pull the market regime, macro events, earnings and news and rebuild "
-                          "signals. Reuses CACHED prices (does not re-download price history), so "
-                          "it's quick (~1–2 min) and does NOT advance the 'market data through' "
-                          "date. Use ‘Pull fresh prices’ for that."):
+        if st.button("🔄 Refresh signals & regime", use_container_width=True,
+                     help="Re-pull the market regime, macro events and earnings and rebuild "
+                          "signals on CACHED prices — quick (~1 min), does NOT advance the 'market "
+                          "data through' date. News sentiment is REUSED from the last scheduled run "
+                          "(no new Claude calls); fresh Claude scoring runs on the 2×/day schedule. "
+                          "Use ‘Pull fresh prices’ to advance the price date."):
             from src import pipeline
-            with st.spinner("Refreshing macro + news (regime, events, earnings, headlines)…"):
+            with st.spinner("Rebuilding signals (regime, events, earnings; reusing cached news)…"):
                 try:
-                    res = pipeline.refresh_macro_news(CONFIG)
+                    res = pipeline.refresh_macro_news(CONFIG, reuse_news=True)
                     load_table.clear()
-                    st.success(f"Macro & news refreshed — regime {res['regime']}, "
-                               f"news via {res['news_source']}.")
+                    st.success(f"Signals & regime refreshed — regime {res['regime']}. "
+                               f"News reused from the last scheduled run (no Claude spend).")
                     st.rerun()
                 except SystemExit as e:
                     st.error(str(e))
@@ -575,14 +576,15 @@ with tab_news:
         if st.button("⬇️ Pull fresh prices", use_container_width=True,
                      help="Re-download the full price history (~500 stocks) and rebuild "
                           "everything — this is what advances 'market data through' to the latest "
-                          "trading day. Slower (~3–5 min). Note: on the hosted app this updates "
+                          "trading day. Slower (~3–5 min). News sentiment is REUSED from the last "
+                          "scheduled run (no new Claude calls). Note: on the hosted app this updates "
                           "your current session only; the scheduled daily job updates the shared "
                           "baseline everyone sees."):
             from src import pipeline
             with st.spinner("Downloading fresh prices for the full universe and rebuilding — "
                             "this can take a few minutes…"):
                 try:
-                    pipeline.run_pipeline(CONFIG, send_digest=False)
+                    pipeline.run_pipeline(CONFIG, send_digest=False, reuse_news=True)
                     load_table.clear()
                     st.success("Fresh prices pulled — market data advanced to the latest trading day.")
                     st.rerun()
@@ -590,10 +592,11 @@ with tab_news:
                     st.error(str(e))
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Price refresh failed: {e}")
-    st.caption("Tip: the hosted app auto-refreshes daily via a scheduled job (GitHub Actions) "
-               "before the open and after the close. **Refresh macro & news** updates the "
-               "regime/news on cached prices; **Pull fresh prices** re-downloads price history and "
-               "advances the market-data date. Locally you can also run `python -m src.pipeline`.")
+    st.caption("Tip: the hosted app auto-refreshes twice daily via a scheduled job (GitHub Actions) "
+               "before the open and after the close — that's when the AI news scoring runs. "
+               "**Refresh signals & regime** rebuilds signals on cached prices; **Pull fresh prices** "
+               "re-downloads price history and advances the market-data date. Both reuse the latest "
+               "scheduled news read (no extra AI cost). Locally you can also run `python -m src.pipeline`.")
 
     # ---- The market backdrop ----
     st.markdown("### 🌡️ The market backdrop")

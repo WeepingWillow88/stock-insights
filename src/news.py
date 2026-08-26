@@ -373,13 +373,24 @@ def _price_context(prices, ticker, regime_label, window=5):
     return "; ".join(parts)
 
 
-def build_news_map(tickers, cfg, prices=None, regime_label=None):
+def build_news_map(tickers, cfg, prices=None, regime_label=None, smart_tickers=None):
     """Return {ticker: {sentiment, label, ..., headlines}} for each ticker. When prices/regime are
-    supplied, Claude also gets each stock's recent move + the regime as context."""
+    supplied, the smart engine (Claude) also gets each stock's recent move + the regime as context.
+
+    `smart_tickers`: if given, ONLY those names are scored with the configured engine (Claude /
+    FinBERT); every other name gets the free keyword scan. News only changes a decision for BUY
+    candidates and current holdings, so this focuses the paid scoring there and cuts cost sharply.
+    `smart_tickers=None` scores every name with the configured engine (backward-compatible)."""
     out = {}
     for t in tickers:
         heads = fetch_headlines(t, cfg)
-        s = score(t, heads, cfg, _price_context(prices, t, regime_label))
+        smart = smart_tickers is None or t in smart_tickers
+        # score() already short-circuits empty headlines to a free neutral, so the non-smart branch
+        # only spends the keyword scan when there's actually something to read.
+        if smart or not heads:
+            s = score(t, heads, cfg, _price_context(prices, t, regime_label))
+        else:
+            s = score_with_keywords(heads)
         s["headlines"] = heads
         out[t] = s
     return out

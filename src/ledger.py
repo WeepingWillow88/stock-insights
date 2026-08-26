@@ -64,6 +64,15 @@ def reconcile(cfg, seed_path="data/seed.db"):
     return both
 
 
+def open_tickers(cfg):
+    """Set of tickers currently held (open or pending sale). Paid news scoring targets these too —
+    a fresh negative headline on something you hold is decision-relevant."""
+    led = _load(cfg)
+    if led.empty:
+        return set()
+    return set(led[led["status"].isin(["open", "sell_pending"])]["ticker"])
+
+
 def record_recommendations(sig, cfg, today=None):
     today = today or dt.date.today().isoformat()
     if sig is None or sig.empty or "selected" not in sig.columns:
