@@ -167,7 +167,7 @@ rules, the sizing maths, and how the daily refresh works.
 | **Confidence %** | How many independent checks agree (trend, momentum, RSI, news). A BUY must clear a minimum bar |
 | **RSI / "momentum"** | 0–100 gauge. >70 overheated, <30 beaten-down; 45–65 is the healthy buy zone |
 | **Daily swing (ATR)** | Typical size of a day's move — sets how wide the safety-exit sits |
-| **News mood** | 🔴/⚪/🟢 read from **StockTwits** crowd bull/bear tags; the day's actionable names also get **Alpha Vantage** article-level news (see the Macro & News tab) |
+| **News mood** | 🔴/⚪/🟢 from **StockTwits** crowd tags + **Alpha Vantage** article news (actionable names), plus a once-daily **Claude insight** — see the Macro & News tab |
 | **Post-earnings drift** | After a stock reports, a big beat the market gapped up on tends to keep drifting up for weeks (a big miss keeps sinking). Nudges Confidence up/down; a strong down-gap blocks a fresh BUY |
 | **Short interest** | Shares bet against the stock, as % of float. High = squeeze fuel but crowded |
 | **Implied vol (IV)** | The move options are pricing in. IV well above recent *realized* moves = event brewing |
@@ -653,12 +653,13 @@ with tab_news:
     else:
         _srcmode = news_df["source"].mode() if "source" in news_df.columns else pd.Series([], dtype=object)
         src = _srcmode.iloc[0] if not _srcmode.empty else "?"
-        st.caption("**Crowd mood** for every name comes from **StockTwits** bull/bear tags "
-                   "(what traders are actually saying — not headline snippets). For the day's "
-                   "**actionable names** (BUY candidates + holdings) we *double down* with "
-                   "**Alpha Vantage** article-level news sentiment (the *Article news* column). "
-                   f"Fallback engine when the crowd is quiet: FinBERT → keywords (mostly **{src}** "
-                   "today). Expand a stock to read the posts/headlines yourself.")
+        st.caption("**Sentiment** (one column) = **StockTwits** crowd bull/bear tags for every name "
+                   "(what traders are actually saying), plus **Alpha Vantage** article-level news "
+                   "(`AV:`) for the day's actionable names — both **live**, refreshed on each run. "
+                   "The **Claude insight** column is a plain-English read on the day's headlines, "
+                   "**refreshed on the morning run** and reused through the day. Fallback when the "
+                   f"crowd is quiet: FinBERT → keywords (engine mode: **{src}**). Expand a stock to "
+                   "read the posts/headlines yourself.")
         only = st.radio("Show", ["All", "Only negative", "Only positive"],
                         horizontal=True, label_visibility="collapsed")
         view = news_df.copy()
@@ -673,31 +674,37 @@ with tab_news:
         view = view.sort_values(["_lab", "_mat"])
 
         summary = view.copy()
-        summary["sentiment_label"] = summary["label"].map(NEWS_EMOJI).fillna(summary["label"])
 
-        def _av_cell(r):
-            if "av_label" not in r or pd.isna(r.get("av_label")) or not r.get("av_label"):
-                return "—"
-            sc = r.get("av_score")
-            return f"{r['av_label']} ({float(sc):+.2f})" if pd.notna(sc) else str(r["av_label"])
-        summary["av_display"] = summary.apply(_av_cell, axis=1)
+        def _sentiment_cell(r):
+            """Crowd mood + AV in one column, e.g. '🔴 negative −0.55 · AV: Somewhat-Bullish'."""
+            emoji = NEWS_EMOJI.get(r.get("label"), "")
+            sc = r.get("sentiment")
+            base = f"{emoji} {r.get('label','')}".strip()
+            if pd.notna(sc):
+                base += f" ({float(sc):+.2f})"
+            av = r.get("av_label") if "av_label" in r else None
+            if av is not None and pd.notna(av) and str(av):
+                base += f"  ·  AV: {av}"
+            return base
+        summary["sentiment_combined"] = summary.apply(_sentiment_cell, axis=1)
+
+        def _insight_cell(r):
+            ins = r.get("claude_insight") if "claude_insight" in r else None
+            return str(ins) if (ins is not None and pd.notna(ins) and str(ins).strip()) else "—"
+        summary["insight"] = summary.apply(_insight_cell, axis=1)
 
         st.dataframe(
-            summary[["ticker", "sentiment_label", "sentiment", "materiality",
-                     "av_display", "source", "rationale"]],
+            summary[["ticker", "sentiment_combined", "materiality", "insight"]],
             width="stretch", hide_index=True,
             column_config={
-                "sentiment_label": st.column_config.TextColumn("Crowd mood"),
-                "sentiment": st.column_config.NumberColumn("Score", format="%.2f",
-                             help="Crowd bull/bear balance: -1 very bearish … +1 very bullish"),
-                "av_display": st.column_config.TextColumn("Article news (AV)",
-                             help="Alpha Vantage article-level news sentiment, shown for the day's "
-                                  "actionable names (BUY candidates + holdings). '—' = not scored "
-                                  "(only the actionable subset is, to stay within the free tier)."),
-                "source": st.column_config.TextColumn("Engine",
-                             help="How the crowd/text score was produced: stocktwits (crowd tags), "
-                                  "finbert (finance model on headlines), or keywords (fallback)."),
-                "rationale": st.column_config.TextColumn("Plain-English read", width="large"),
+                "sentiment_combined": st.column_config.TextColumn("Sentiment (crowd · AV)",
+                             help="StockTwits crowd bull/bear balance (−1…+1) for every name, plus "
+                                  "Alpha Vantage article-level news (AV:) for the day's actionable "
+                                  "names. Live — refreshed on both daily runs."),
+                "insight": st.column_config.TextColumn("Claude insight", width="large",
+                             help="A plain-English read from Claude on the day's headlines, "
+                                  "refreshed on the morning run and reused through the day. "
+                                  "'—' = not scored this cycle."),
             })
         st.markdown("#### Dig into the headlines")
         for _, row in view.iterrows():
@@ -1055,79 +1062,41 @@ with tab_how:
     st.subheader("How a recommendation is built — step by step")
     st.markdown(
         f"""
-Everything below runs top-to-bottom each time the data is refreshed. **Every number in
-bold is a setting you can ask to change** (they live in `src/config.py`).
+Everything below runs top-to-bottom on each data refresh. **Every bold number is a setting you
+can ask to change** (`src/config.py`).
 
----
+**1 · Universe** — the **S&P 500** (liquid, reliable); widen to the **S&P 1500** via `universe_scope`.
 
-#### Step 1 — Pick the universe
-Start with the **S&P 500** (a reliable, liquid list). Can be widened to the **S&P 1500** (adds
-mid- and small-caps — more high-beta candidates; the liquidity filters still prune the illiquid
-ones) via the `universe_scope` setting.
+**2 · Tradable filter** — keep only price ≥ **${c.min_price:,.0f}** and average daily dollar-volume
+≥ **${c.min_avg_dollar_volume/1e6:,.0f}M**.
 
-#### Step 2 — Keep only *tradable* stocks
-A stock must pass **both** filters or it's dropped:
-- Price ≥ **${c.min_price:,.0f}** (avoid penny stocks)
-- Average daily dollar-volume ≥ **${c.min_avg_dollar_volume/1e6:,.0f} million** (enough liquidity to get in/out)
+**3 · Measure** — beta (vs **{c.benchmark}**, over {c.beta_window} days), 1- & 3-month momentum,
+trend (price vs its 50- and 200-day averages), ATR (typical daily swing), and RSI ({c.rsi_period}-day).
 
-#### Step 3 — Measure each stock
-- **Beta** — how much the stock moves versus the market (**{c.benchmark}**), using the last
-  **{c.beta_window} trading days**. Formula: `beta = covariance(stock returns, market returns) ÷ variance(market returns)`.
-  Beta 1 = moves with the market; beta 2 = moves ~twice as much (both directions).
-- **Momentum** — % price change over the last ~1 month and ~3 months.
-- **Trend** — is price above its 50-day average, and is the 50-day above the 200-day?
-- **ATR (volatility)** — the average daily price swing (how far it typically moves in a day).
-- **RSI** — a 0–100 momentum gauge over **{c.rsi_period} days** (high = overbought, low = oversold).
+**4 · Rank** — keep **beta ≥ {c.min_beta}**, then score `0.6·beta + 0.4·(3-mo momentum) + 0.5 if
+up-trending` (beta & momentum standardised first). The top **{c.shortlist_size}** become the shortlist.
 
-#### Step 4 — Rank the high-beta shortlist
-Keep only stocks with **beta ≥ {c.min_beta}**, then score and sort them:
-
-> **score = 0.6 × (beta) + 0.4 × (3-month momentum) + 0.5 bonus if up-trending**
->
-> *(beta and momentum are standardised first so they're comparable.)*
-
-The top **{c.shortlist_size}** by score become the shortlist. **#1 = the strongest mix of high
-beta and positive trend.** The weights (0.6 / 0.4 / 0.5 bonus) are all adjustable.
-
-#### Step 5 — Turn each into a signal
-| Signal | Triggered when |
+**5 · Signal**
+| | |
 |---|---|
-| 🔴 **SELL** | Price drops **below its 50-day average** (trend broken), or it's weak (RSI < 35) and not trending |
-| 🟡 **HOLD** | Up-trend but **overbought** (RSI ≥ **{c.rsi_overbought:.0f}**, wait for a pullback), or momentum cooling (RSI < **{c.rsi_min_buy:.0f}**), or no clear setup |
-| 🟢 **BUY** | Up-trend **and** positive momentum **and** healthy RSI (**{c.rsi_min_buy:.0f}–{c.rsi_overbought:.0f}**) — **and** it clears three quality gates: **beating the S&P** (relative strength), **above-average volume**, and **confidence ≥ {c.min_conviction}%**. These mirror the backtested rules, so a live BUY is the same setup the backtest validated. |
+| 🔴 **SELL** | price below its 50-day average (trend broken), or weak (RSI < 35) and not trending |
+| 🟡 **HOLD** | up-trend but overbought (RSI ≥ **{c.rsi_overbought:.0f}**) or cooling (RSI < **{c.rsi_min_buy:.0f}**), or no clear setup |
+| 🟢 **BUY** | up-trend **and** positive momentum **and** RSI **{c.rsi_min_buy:.0f}–{c.rsi_overbought:.0f}** — **plus** three gates: beats the S&P (relative strength), above-average volume, and **confidence ≥ {c.min_conviction}%**. (The same rules the backtest validated.) |
 
-#### Step 6 — Size the position (for BUY signals)
-Your rules drive the maths:
-- **Money at risk per trade** = {c.risk_per_trade*100:.1f}% of £{c.capital_gbp:,.0f} = **£{risk_gbp:,.0f}** (converted to USD at the live rate).
-- **Stop-loss** = entry − **{c.atr_stop_mult:.0f} × ATR** (a wide stop suits volatile names).
-- **Target** = entry + **{c.reward_risk:.0f} ×** the stop distance (a **{c.reward_risk:.0f}:1** reward-to-risk trade).
-- **Shares to buy** = the **smaller** of:
-  1. `£{risk_gbp:,.0f} at risk ÷ stop distance` (risk-based), and
-  2. `(£{c.capital_gbp:,.0f} ÷ {c.max_positions} positions) ÷ entry price` (equal-weight capital slot).
+**6 · Size (BUYs only)** — risk **{c.risk_per_trade*100:.1f}% of £{c.capital_gbp:,.0f} = £{risk_gbp:,.0f}**
+per trade (converted to USD at the live rate). Stop = entry − **{c.atr_stop_mult:.0f}×ATR**;
+target = **{c.reward_risk:.0f}:1** reward-to-risk. Shares = the **smaller** of *risk ÷ stop distance*
+and *(£{c.capital_gbp:,.0f} ÷ {c.max_positions} slots) ÷ price* — so you never exceed either limit.
+**Buy up to** entry + **{c.max_chase_frac:.0%}** of the stop distance (≈ half an ATR); above that,
+don't chase. The stop then **trails** to **{c.trail_atr_mult:.1f}×ATR below the highest close** and
+exits on a close below the **{c.trend_exit_sma}-day** average — winners run, losers get cut. The
+**track record scores trades this exact way**; each *All signals* row carries a **Track record** tag
+(🟡 *Holding*, or 🟢/🔴 the last closed result in R) — a *past* call that can differ from today's.
 
-  Taking the smaller means you **never risk more than £{risk_gbp:,.0f}** *and* **never overspend one slot**.
-- **Don't chase (Buy up to)** — the "Buy at" price is the signal's last close; by the time you look,
-  the live price may have moved. **Buy up to = entry + {c.max_chase_frac:.0%} of the stop distance**
-  (≈ half an ATR) is the most it's worth paying that day. Above it, your fixed stop makes the
-  reward-to-risk too thin — skip it or wait for a pullback.
-- **Managing the exit** — the initial stop is your safety net, but the trade is then **trailed**: as it
-  runs, ratchet the stop up to **{c.trail_atr_mult:.1f} × ATR below the highest close so far**, and also
-  **exit on a close below its {c.trend_exit_sma}-day average** (a broken trend). The 2:1 target is a
-  reference, not a hard ceiling — trailing lets winners run and cuts losers early. The **track record
-  scores trades exactly this way**, so the live scorecard reflects the rules you'd actually follow.
-  Each row in the **All signals** table carries a **Track record** tag linking it to this ledger
-  (🟡 *Holding*, or 🟢/🔴 the last closed result in R). That's a *past* call and can legitimately differ
-  from today's fresh signal — a name can be bought, closed as a win, and rate HOLD again days later.
-
-#### Step 7 — Build the portfolio
-Fill up to **{c.max_positions} positions** from the BUY signals by rank, subject to three guards:
-- **Sector cap** — at most **{c.max_per_sector} per sector**.
-- **Correlation cap** — skip a pick moving ≥ **{c.max_position_correlation:.0%}** in lockstep with one already
-  held, so your slots aren't secretly one macro bet (real diversification, not just different tickers).
-- **Heat ceiling** — total £-at-risk stays under **{c.max_portfolio_heat*100:.0f}%** of capital.
-
-Sizes are **edge-weighted**: higher-confidence setups get closer to full size, the lowest-confidence
-ones as little as **{c.edge_size_floor:.0%}** — putting more capital where the edge is stronger.
+**7 · Portfolio** — fill up to **{c.max_positions}** BUYs by rank, capped at **{c.max_per_sector} per
+sector**, skipping names ≥ **{c.max_position_correlation:.0%}** correlated with one already held, and
+keeping total risk under **{c.max_portfolio_heat*100:.0f}%** of capital. Sizes are **edge-weighted** —
+higher confidence → closer to full size, down to a **{c.edge_size_floor:.0%}** floor.
 """
     )
 
@@ -1147,120 +1116,69 @@ Say a stock triggers a 🟢 BUY at **entry $100**, with an **ATR of $4** and the
     st.markdown(
         f"""
 ---
-### Macro overlay — the market context (Phase 3, Layers A & B)
-Before trusting a BUY, the app now checks the *weather*, not just the individual stock:
+### Market-context overlays
+A BUY must also survive the *weather*, not just the stock:
 
-**Layer A — market-regime gate.** It reads free public gauges — the **S&P 500** and
-**Nasdaq-100** trends, the **VIX** (fear gauge), the **semiconductor ETF (SMH)**, the **US 10-year
-yield**, **high-yield credit (HYG)** (credit tends to crack before equities), and **market breadth**
-(how much of the universe is actually in an uptrend, not just the megacaps) — and scores them into
-one of three regimes:
-- 🟢 **RISK-ON** → BUYs at full size.
-- 🟡 **CAUTION** → BUYs allowed but **sized down to 50%**.
-- 🔴 **RISK-OFF** → **new BUYs paused** (they become HOLD). High beta is dangerous in a falling market.
+**A · Regime gate** — reads SPY & Nasdaq-100 trends, the VIX, semis (SMH), the US 10-year yield,
+high-yield credit (HYG) and market breadth → **🟢 RISK-ON** (full size), **🟡 CAUTION** (half size),
+or **🔴 RISK-OFF** (new BUYs paused — high beta is dangerous in a falling market).
 
-**Layer B — event risk.** Scheduled 'landmines' that whip these stocks around:
-- **Earnings** within **{c.earnings_block_days} days** → a BUY becomes HOLD (don't open a swing right before earnings).
-- **Macro events** (CPI, FOMC, jobs) within **{c.macro_event_sizedown_days} days** → positions **sized down**, and tagged in the **flags** column.
+**B · Event risk** — **earnings within {c.earnings_block_days} days** → a BUY becomes HOLD (don't
+swing into a print); a **CPI / FOMC / jobs** event within **{c.macro_event_sizedown_days} days** →
+positions halved and flagged.
 
-This is exactly the "Micron dips on inflation/Iran news but recovers" instinct, encoded:
-the app won't pile into high beta into a CPI print or a risk-off tape.
+**C · Sentiment** — every name gets **StockTwits** crowd bull/bear mood (−1…+1); a negative crowd
+read **lowers Confidence and flags caution** but doesn't itself block a BUY. The day's **actionable
+names** (BUY candidates + open positions) additionally get **Alpha Vantage** article-level news
+sentiment. A strongly negative read from the **model engine (FinBERT)** is what actually turns a
+🟢 BUY into a 🟡 HOLD. When the crowd is quiet, sentiment falls back to **FinBERT → keywords** over
+recent headlines (Finnhub → Google News, with CNBC blended in). Alongside the numbers, a
+**Claude insight** — a plain-English read of each name's headlines — is generated **once daily on
+the morning run** and reused through the day (so it costs pennies and never blocks a trade; it's
+qualitative colour, not a gate).
 
-**Layer C — sentiment (live).** For **every** shortlist stock the app reads **StockTwits crowd
-sentiment** — the bull/bear tags traders attach to their posts. That's a *market-mood* signal, not
-a headline-snippet guess, which is the right read for jumpy, retail-driven high-beta names and costs
-nothing. It produces a sentiment (−1…+1), a materiality, and an action bias; a **strongly negative,
-material** read turns a 🟢 BUY into a 🟡 HOLD. When the crowd is too quiet to trust, it falls back to
-**FinBERT** (a finance-trained model on the headlines, when installed) → a **keyword** scan.
+**D · Options & short interest** *(informational — they flag and inform sizing, don't block a BUY)* —
+heavy short interest (≥ **{c.high_short_pct_float*100:.0f}%** of float = squeeze fuel), rich options
+(IV ≥ **{c.iv_rich_ratio:.1f}×** realised = a big move priced in, often earnings), and net analyst
+up-/down-grades.
 
-To *double down* on the day's decisions, the **actionable names only** — today's **BUY candidates**
-and your **open positions** — additionally get **Alpha Vantage** article-level news sentiment
-(`ALPHAVANTAGE_API_KEY`), which scores the *full article* server-side (with a relevance weight, so a
-stock merely mentioned doesn't skew it). It can only *tighten* caution — a bearish article read can
-downgrade a BUY, but news never fabricates one. Alpha Vantage's free tier is 25 calls/day, so it
-runs **once daily** (the pre-close run) and is budget-capped; the on-demand refresh buttons **reuse**
-the latest scored read. (Claude headline scoring is retired here — the configured key routed via an
-internal gateway that couldn't authenticate from the cloud.) All of this is compiled in the
-**📰 Macro & News tab**.
+**E · Post-earnings drift (PEAD)** — the flip side of the earnings blackout: once a stock **has**
+reported, its **price reaction** tends to persist. A positive drift within **{c.pead_drift_days} days**
+(reaction ≥ **{c.pead_min_gap*100:.0f}%**) adds **+{c.pead_conviction_bonus}** to Confidence; a negative
+one subtracts **{c.pead_conviction_penalty}**, and a strong down-gap (≥ **{c.pead_strong_gap*100:.0f}%**)
+turns a BUY → HOLD. It only nudges an otherwise-valid setup, and isn't in the backtest.
 
-**Layer D — options & short interest.** Two extras that move high-beta names hard, shown in the
-**🔎 Squeeze & volatility watch** table and as **flags**:
-- **Short interest** — shares sold short as a % of float, plus *days-to-cover*. Heavily-shorted
-  names (≥ **{c.high_short_pct_float*100:.0f}%** of float) are **squeeze fuel** (violent up moves) but
-  crowded and crash-prone; the app flags them so you size with eyes open.
-- **Implied vs realized volatility** — when at-the-money options price a move **≥ {c.iv_rich_ratio:.1f}×**
-  the stock's recent realized move, the market is bracing for something (often earnings). Buying
-  into rich IV is how you can be right on direction yet lose on the vol crush — so it's flagged.
-- **Analyst revisions** — net recent upgrades minus downgrades (revision momentum is one of the
-  more robust short-horizon drivers); flagged when analysts are clearly moving one way. *(Free
-  best-effort via Yahoo; a paid estimate-revisions feed would sharpen it.)*
+**Refresh & schedule.** *🔄 Refresh signals & regime* rebuilds signals on the stored prices (fast —
+no re-download, no AI spend); *⬇️ Pull fresh prices* re-downloads history and advances the
+market-data date. A **GitHub Action** runs the full pipeline twice each weekday (pre-open + before
+the close), rebuilds `seed.db` and pushes it, so the hosted app stays fresh hands-off; each
+recommendation is timestamped with its run. (In-app buttons refresh your session only — the cloud
+filesystem is temporary.)
 
-These are **informational** — they flag a name and inform sizing, but don't by themselves block a BUY.
-
-**Layer E — post-earnings drift (PEAD).** Layer B keeps the app *out* of a stock right before it
-reports (the print is a coin-flip). This layer handles the *other* side of the event: once a stock
-**has** reported, a strong beat the market rewarded with a **gap-up** tends to keep drifting up for
-weeks — and a big miss keeps bleeding. It's one of the most durable anomalies in markets, and it's
-**momentum-aligned** (it rewards a move that already happened, not a bet on an unknown result). The
-app reads the drift from the **price reaction** (the 2-session move around the report, which already
-bakes in the beat/miss *and* the guidance), using the reported EPS surprise only for labelling:
-- A **positive** drift within the last **{c.pead_drift_days} days** (reaction **≥ {c.pead_min_gap*100:.0f}%**) adds
-  **+{c.pead_conviction_bonus}** to Confidence — the one place a good earnings event is *allowed* to help.
-- A **negative** drift subtracts **{c.pead_conviction_penalty}**, and a **strong** down-gap (**≥ {c.pead_strong_gap*100:.0f}%**)
-  turns a 🟢 BUY into a 🟡 HOLD outright (the drift is against a fresh long).
-
-It can only *nudge* an otherwise-valid setup — the price/trend/momentum technicals still lead, and
-the pre-earnings blackout still fires first. *(Best-effort earnings data via Yahoo; like the news
-layer, this live tilt is **not** in the backtest, since point-in-time historical surprises aren't
-reliably free — so treat it as a live nudge, not part of the validated edge.)*
-
-**Two refresh modes.** *Refresh signals & regime* re-pulls the regime, events and earnings and
-rebuilds signals **on the prices already stored**, reusing the latest AI-scored news — it's quick
-and does **not** move the market-data date or spend on AI. *Pull fresh prices*
-(and the full `python -m src.pipeline`) re-downloads the whole price history and recomputes
-everything — that's what advances **market data through** to the latest trading day. On the
-hosted app a **scheduled job (GitHub Actions)** runs the full pipeline twice each weekday — once
-**pre-open** (morning) and once **~15 min before the close** — rebuilds the shared `seed.db` and
-pushes it, so the live app refreshes without anyone pressing a button. Each recommendation is
-**timestamped** with which run produced it. (Pressing *Pull fresh prices* in the hosted app
-refreshes your current session only — the cloud filesystem is temporary.)
-
-**The daily buy/sell rhythm.** The Signals tab is a clean two-list action plan:
-- **🟢 BUY these** — *new* positions to open today (names you already hold aren't repeated; they
-  live under *your open positions* on the Track record tab). Each run's buy list is a fresh
-  snapshot at that run's prices.
-- **🔴 SELL these** — holdings whose exit has triggered (trailing stop / trend break / time limit).
-  This is a **two-phase, manual-sell** flow: a name is flagged **SELL today**, you sell at your
-  next opportunity, and on the **next run it's closed at that session's price** and moves to
-  **Closed trades** — so the recorded P&L reflects a realistic manual fill, not the exact stop.
-
-**Alerts.** Each run (before the open / after the close) emails a digest — or saves it to
-`data/alerts/` if email isn't configured. Between runs, an **hourly news-shock check**
-(`python -m src.shock`) scans for a big intraday move + fresh headline and alerts you.
+**Daily rhythm.** **🟢 BUY these** = new positions to open today; **🔴 SELL these** = holdings whose
+trailing-stop / trend-break / time-limit exit has fired — a two-phase manual sell (flagged today,
+closed at the next session's price, then moved to Closed trades). Each run emails a digest (or saves
+it to `data/alerts/`); a **news-shock check** (`python -m src.shock`) can be run between runs to catch
+a big intraday move + fresh headline.
 
 ---
 
-### Where each piece of data comes from
+### Where the data comes from
+All on **free** sources by default; keys (in `.env` / Action secrets, never in code) unlock upgrades.
 
-Everything runs on **free sources by default**, and transparently upgrades when an API key is set.
-Keys live in a local `.env` (or the hosted app's GitHub Action secrets) — never in the code.
+| What | Source | Notes |
+|---|---|---|
+| **Prices / regime / backtest** | yfinance (free) — SPY, QQQ, VIX, SMH, 10-yr, HYG + breadth | Accurate; a paid feed only matters for *reliability* with real money |
+| **Crowd sentiment** (every name) | **StockTwits** bull/bear tags (free) | Reads market mood directly; falls back to FinBERT/keywords when quiet |
+| **Article news** (actionable names) | **Alpha Vantage** `NEWS_SENTIMENT` (free ~25/day) | Full-article, relevance-weighted; rotate keys or go premium for more |
+| **Headlines** (feed the fallback) | Finnhub → Google News RSS, CNBC blended | Scored by FinBERT → keywords when StockTwits is quiet |
+| **Claude insight** (once/morning) | **Claude** (`ANTHROPIC_API_KEY`, `{c.claude_model}`) on the day's headlines | Qualitative read, refreshed AM & reused all day (~pennies/mo); display-only |
+| **Macro calendar** (CPI/FOMC/jobs) | curated list → **FMP** (paid) | The one thing worth paying for; keep the seeded list current |
+| **Earnings / PEAD** | FMP (free where available) → yfinance | Best-effort dates; PEAD reads the drift from our own price bars |
+| **Options IV · short interest · analyst revisions** | yfinance best-effort | Informational flags only |
 
-| What | Source today | Upgrades to (if key set) | Verdict / what would make it better |
-|---|---|---|---|
-| **Prices** (signals, regime, backtest) | yfinance — free, unofficial | — | Accurate & fine. A paid feed (Polygon/Tiingo) only matters for *reliability* if this ever drives real money |
-| **Market backdrop / regime** | yfinance: SPY, QQQ, VIX, SMH, US 10-yr, HYG credit + breadth | — | **Strong as-is — no paid source needed.** Well-diversified multi-factor read |
-| **Crowd sentiment** (every name) | **StockTwits** public stream — traders' Bullish/Bearish tags | — (free, no key) | **Free and context-independent** — reads market mood directly, ideal for high-beta/retail names. Best-effort public endpoint; falls back to FinBERT/keywords if a name is quiet |
-| **Article-level news** (actionable names) | **Alpha Vantage** `NEWS_SENTIMENT` (`ALPHAVANTAGE_API_KEY`) — per-ticker score over the *full article* + relevance weight | free tier ~25/day (rotate several free keys) → premium ~$50/mo | Scores whole articles, not snippets. Free tier covers the day's BUY candidates + holdings once daily; premium (or more free keys) lifts the cap |
-| **Sentiment fallback** | local **FinBERT** (finance-trained) → **keyword** scan | — | Only used when StockTwits is quiet. Claude headline scoring retired (internal-gateway key 401s from the cloud) |
-| **Macro calendar** (CPI/FOMC/jobs) | curated seeded list (`events.py`) | **FMP** economic-calendar (`FMP_API_KEY`, **paid tier only**) | **The one thing worth paying for.** Free FMP/Finnhub tiers 402 here; the seeded list works but must be kept current |
-| **Earnings dates** | **FMP** earnings-calendar (free, where it has the name) → yfinance fallback | FMP paid = full coverage | Free tier samples a subset, so it *supplements* yfinance rather than replacing it |
-| **Post-earnings drift** | yfinance earnings dates + surprise, drift read from our own price bars | Paid earnings feed = cleaner dates/surprises | Momentum-aligned tilt; best-effort dates, not in the backtest |
-| **Options IV · short interest · analyst revisions** | yfinance best-effort | — | Informational flags only; a paid options/estimate-revisions feed would sharpen them |
-
-**Bottom line:** the market backdrop and sentiment now run entirely on **free** sources — StockTwits
-crowd mood for every name, plus Alpha Vantage article-level news (free key) on the day's actionable
-picks. The only source genuinely worth *paying* for is a real macro/econ calendar (upgrade FMP or
-Finnhub premium); Alpha Vantage premium is a distant second if you outgrow the free 25/day news cap.
+**Bottom line:** backdrop and sentiment run entirely on free sources. The only source worth *paying*
+for is a real macro/econ calendar (FMP/Finnhub premium); more Alpha Vantage news is a distant second.
 
 ---
 """
@@ -1268,26 +1186,19 @@ Finnhub premium); Alpha Vantage premium is a distant second if you outgrow the f
 
     st.markdown(
         f"""
-### 🛡️ Reliability & safety features
-- **Confidence score** — each pick shows what % of independent checks agree (trend, medium-
-  and short-term momentum, healthy RSI, news not against it). Higher = more sure.
-- **Diversification cap** — the portfolio takes at most **{c.max_per_sector} picks per sector**,
-  so your {c.max_positions} slots can't secretly become one big bet on (say) chips.
-- **Steadier beta** — beta is nudged **{int(c.beta_shrink*100)}% of the way** to its raw value and
-  the rest toward the market average (a standard technique) so a noisy estimate doesn't mislead.
-- **Data checks** — stale or gap-filled tickers are dropped before they can produce a signal.
-- **Circuit-breaker** — if trades closed today are down more than
-  **{c.daily_loss_limit_pct*100:.0f}% of your capital**, the Track-record tab warns you to pause.
-- **Track record + backtest** (📈 tab) — every recommendation is logged and scored over time
-  (live scorecard), and you can replay the rules over ~{c.backtest_years} of history — including
-  bear markets — to see if they have an edge. The backtest uses **trailing-stop + trend-break
-  exits** (gap-aware), **filtered entries** (conviction, volume, relative strength, rising-market
-  only), and a **robustness check** (a Monte-Carlo range for the edge + a stop-width sensitivity
-  sweep) so a good result isn't just luck or one lucky setting. Everything is shown in **R**
-  (multiples of your risk).
+### 🛡️ Safety & reliability
+- **Confidence** — % of independent checks that agree (trend, 1- & 3-month momentum, healthy RSI,
+  sentiment not against it), then nudged by post-earnings drift.
+- **Diversification** — at most **{c.max_per_sector} picks per sector**, so your slots can't become one bet.
+- **Steadier beta** — shrunk **{int(c.beta_shrink*100)}%** toward the market average so a noisy estimate can't mislead.
+- **Data checks** — stale or gappy tickers are dropped before they can signal.
+- **Circuit-breaker** — warns if today's closed trades lose more than **{c.daily_loss_limit_pct*100:.0f}% of capital**.
+- **Backtest** (📈 tab) — replays ~{c.backtest_years} of history (incl. bear markets) with the same
+  trailing/trend exits and filtered entries, plus a Monte-Carlo range and stop-width sweep so a good
+  result isn't luck. Everything in **R** (multiples of risk).
 
-*Honest note: this reduces risk and measures the edge — it does not guarantee profit. Short-term
-moves are close to random; the discipline (stops, sizing, diversification) is what protects you.*
+*Honest note: this manages risk and measures the edge — it doesn't guarantee profit. Short-term moves
+are close to random; the discipline (stops, sizing, diversification) is the protection.*
 
 ---
 """

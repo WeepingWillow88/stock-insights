@@ -124,10 +124,15 @@ class Config:
     stocktwits_min_tags: int = 3          # need at least this many tagged posts to trust the crowd read
     use_alpha_vantage: bool = True        # article-level confirmation on actionable names (needs key)
     av_max_calls_per_run: int = 20        # cap AV calls/run — stays under the free 25/day (run 1x/day)
-    use_claude_news: bool = False         # OFF: the configured key routes via a Salesforce-internal
-    #                                       gateway that 401s from CI/Streamlit, so it silently fell
-    #                                       back to keywords anyway. StockTwits/AV replace it.
+    use_claude_news: bool = False         # OFF: Claude does not drive the *quantitative* signal
+    #                                       (StockTwits/AV do). It provides a qualitative insight
+    #                                       instead — see use_claude_insight.
     use_finbert: bool = True              # fallback: local FinBERT if installed (no key needed)
+    # Claude qualitative insight: a rich plain-English read per name, refreshed ONLY on the morning
+    # (pre-open) automated run and reused all day (pre-close run + dashboard buttons don't re-call),
+    # so cost stays ~pennies. Display-only — it doesn't change the BUY/SELL/HOLD signal. Uses the
+    # public Anthropic API (ANTHROPIC_API_KEY); skipped gracefully if the key/SDK is unavailable.
+    use_claude_insight: bool = True
     claude_model: str = "claude-haiku-4-5"  # cheap headline classification within budget;
     #                                         swap to "claude-opus-5" for maximum quality
     news_headlines: int = 8               # headlines/news items pulled per ticker

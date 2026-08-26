@@ -142,6 +142,8 @@ def _macro_news_frames(reg, macro_events, news_map, run_date):
          "action_bias": v.get("action_bias"), "source": v.get("source"),
          "av_score": v.get("av_score"), "av_label": v.get("av_label"),
          "av_articles": v.get("av_articles"),
+         "claude_insight": v.get("claude_insight"), "claude_label": v.get("claude_label"),
+         "claude_score": v.get("claude_score"),
          "rationale": v.get("rationale"), "headlines": " || ".join(v.get("headlines", [])),
          "run_date": run_date}
         for t, v in news_map.items()
@@ -165,6 +167,8 @@ def _load_news_map(cfg):
             "action_bias": r.get("action_bias"), "source": r.get("source"),
             "av_score": r.get("av_score"), "av_label": r.get("av_label"),
             "av_articles": r.get("av_articles"),
+            "claude_insight": r.get("claude_insight"), "claude_label": r.get("claude_label"),
+            "claude_score": r.get("claude_score"),
             "rationale": r.get("rationale"),
             "headlines": [h for h in raw.split(" || ") if h],
         }
@@ -186,9 +190,41 @@ def _news_map_for(cfg, prices, shortlist, reg_label, reuse_news):
     # manual run does it). StockTwits still scores every name on every run regardless.
     run_kind = os.environ.get("RUN_KIND", "").lower()
     use_av = cfg.use_alpha_vantage and "pre-open" not in run_kind
-    nm = news.build_news_map(shortlist["ticker"].tolist(), cfg, prices, reg_label,
-                             smart_tickers=smart, use_av=use_av)
+    tickers = shortlist["ticker"].tolist()
+    nm = news.build_news_map(tickers, cfg, prices, reg_label, smart_tickers=smart, use_av=use_av)
+
+    # Claude qualitative insight: refresh on the MORNING (pre-open) run — and on manual/local runs,
+    # or if none is cached yet — but REUSE the stored insight on the pre-close run so it persists
+    # through the day at no extra Claude cost. Display-only; it doesn't change the signal.
+    cached = _cached_claude(cfg)
+    refresh_claude = cfg.use_claude_insight and ("pre-close" not in run_kind or not cached)
+    insights = (news.build_claude_insights(tickers, cfg, prices, reg_label)
+                if refresh_claude else cached)
+    if refresh_claude:
+        print(f"      claude insight: refreshed for {len(insights)} names (morning run).")
+    else:
+        print(f"      claude insight: reused {len(insights)} cached reads (pre-close — no new calls).")
+    for t, fields in insights.items():
+        if t in nm:
+            nm[t].update(fields)
     return nm, len(smart)
+
+
+def _cached_claude(cfg):
+    """The last stored Claude insights ({ticker: {claude_insight, claude_label, claude_score}}).
+    Empty if the news table has no insight column yet (first run before the feature shipped)."""
+    if not db.table_exists("news", cfg.db_path):
+        return {}
+    df = db.read_df("SELECT * FROM news", cfg.db_path)
+    if "claude_insight" not in df.columns:
+        return {}
+    out = {}
+    for _, r in df.iterrows():
+        ins = r.get("claude_insight")
+        if pd.notna(ins) and str(ins).strip():
+            out[r["ticker"]] = {"claude_insight": ins, "claude_label": r.get("claude_label"),
+                                "claude_score": r.get("claude_score")}
+    return out
 
 
 def _persist_signals_bundle(sig, reg_row, events_df, news_df, cfg):

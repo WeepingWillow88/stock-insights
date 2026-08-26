@@ -487,3 +487,26 @@ def build_news_map(tickers, cfg, prices=None, regime_label=None, smart_tickers=N
             if t in out:
                 _apply_av(out[t], a)
     return out
+
+
+def build_claude_insights(tickers, cfg, prices=None, regime_label=None):
+    """A rich, qualitative Claude read per ticker from the latest NEWS headlines (not the crowd
+    chatter) — the 'why' behind the numbers. Returns {ticker: {claude_insight, claude_label,
+    claude_score}} for the names it could score. Meant to run ONCE/day on the morning automated run;
+    every failure is skipped so a bad key / SDK never breaks the pipeline. Uses the public Anthropic
+    API via ANTHROPIC_API_KEY (no gateway) when run in CI."""
+    if not cfg.use_claude_insight:
+        return {}
+    out = {}
+    for t in tickers:
+        heads = fetch_headlines(t, cfg)  # article headlines, not StockTwits posts
+        if not heads:
+            continue
+        try:
+            r = score_with_claude(t, heads, cfg, _price_context(prices, t, regime_label))
+        except Exception:  # noqa: BLE001 - no creds / gateway 401 / refusal -> skip this name
+            continue
+        out[t] = {"claude_insight": r.get("rationale"),
+                  "claude_label": r.get("label"),
+                  "claude_score": r.get("sentiment")}
+    return out
