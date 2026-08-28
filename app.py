@@ -420,7 +420,9 @@ with tab_sig:
             st.caption("**Buy at** = the signal price · **Buy up to** = the most it's worth paying "
                        "today · **Price** = latest market price · **Buyable?** = ✅ still in range, or "
                        "⚠️ it's run past the entry / no longer a fresh BUY, so skip it or wait for a "
-                       "pullback.")
+                       f"pullback. *Note: these are today's fresh picks — the {CONFIG.max_positions}-position / "
+                       "risk cap is applied per run, so adding them on top of names you already hold can "
+                       "take you above it. Mind your total open count.*")
 
         # SELL these — holdings the exit rules flagged today; they close at the next session's price.
         _pending = _ledger.pending_sells_view(load_table("prices"), CONFIG)
@@ -472,7 +474,36 @@ with tab_sig:
         st.subheader("All signals")
         types = st.multiselect("Show signal types", ["BUY", "HOLD", "SELL"],
                                default=["BUY", "HOLD", "SELL"])
-        view = sig[sig["signal"].isin(types)].copy()
+
+        # Align held names with the ledger's exit model: the screen's SELL rule (below the 50-day)
+        # is coarser than the ledger's live exit (trailing-stop / 20-day trend-break / time limit),
+        # so a holding could read SELL here while the 📈 Track record still holds it. For any name
+        # you actually hold, defer this table's signal to the ledger's action so the two tabs agree.
+        sig_disp = sig.copy()
+        _held_action = {}
+        try:
+            _prices_df = load_table("prices")
+            _ov = _ledger.open_positions_view(_prices_df, CONFIG)
+            for _, _r in _ov.iterrows():
+                _held_action[_r["ticker"]] = (_r.get("action", "HOLD"), str(_r.get("reason", "")))
+            for _, _r in _ledger.pending_sells_view(_prices_df, CONFIG).iterrows():
+                _held_action[_r["ticker"]] = ("SELL", str(_r.get("reason", "exit flagged — sells next session")))
+        except Exception:  # noqa: BLE001 - no ledger/prices yet -> table shows the raw screen signal
+            _held_action = {}
+        if _held_action:
+            def _reconcile(row):
+                a = _held_action.get(row["ticker"])
+                if not a:
+                    return pd.Series([row["signal"], row.get("reason", "")])
+                action, why = a
+                if action == "SELL":                       # ledger exit fired/flagged
+                    return pd.Series(["SELL", f"Holding — {why}"])
+                if row["signal"] == "SELL":                 # screen says SELL but ledger still holds
+                    return pd.Series(["HOLD", f"Holding — ledger exit not triggered ({why})"])
+                return pd.Series([row["signal"], row.get("reason", "")])
+            sig_disp[["signal", "reason"]] = sig_disp.apply(_reconcile, axis=1)
+
+        view = sig_disp[sig_disp["signal"].isin(types)].copy()
         view["signal"] = view["signal"].map(SIG_EMOJI).fillna(view["signal"])
 
         # ---- Track-record link: today's signal is a fresh call; the ledger is the honest

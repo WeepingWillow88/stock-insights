@@ -24,7 +24,17 @@ on:
     - cron: "20,35,50 19 * * 1-5"
     # --- pre-close, EST/winter: 15:20 / 15:35 / 15:50 ET (staggered redundancy) ---
     - cron: "20,35,50 20 * * 1-5"
-  workflow_dispatch:           # allow manual "Run workflow" from the Actions tab
+  # GitHub's own cron is unreliable (it delivered this repo's runs hours late / overnight and
+  # missed slots). The RELIABLE path is an EXTERNAL scheduler (e.g. cron-job.org) that POSTs to
+  # this workflow's dispatch API at exact times with the `kind` input — a dispatch runs immediately,
+  # so timing is precise. The schedule crons above stay as a best-effort fallback.
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "Run label -> RUN_KIND (pre-open refreshes Claude; pre-close refreshes AV)."
+        type: choice
+        default: manual
+        options: [manual, pre-open, pre-close, post-close]
 
 # Never let two refreshes run at once (they both push seed.db).
 concurrency:
@@ -52,6 +62,8 @@ jobs:
 
       - name: Decide whether to run + label it (DST-aware, around the NYSE close)
         id: gate
+        env:
+          DISPATCH_KIND: ${{ github.event.inputs.kind }}
         run: |
           python3 - <<'PY'
           import os, datetime, subprocess
@@ -59,8 +71,13 @@ jobs:
           now = datetime.datetime.now(ZoneInfo("America/New_York"))
           event = os.environ.get("GITHUB_EVENT_NAME", "")
           run, kind = "yes", "manual"
-          if event == "schedule":
-              if now.hour < 12:                     # the morning cron
+          if event == "workflow_dispatch":
+              # An external scheduler (or a manual "Run workflow") sets the label explicitly.
+              dk = (os.environ.get("DISPATCH_KIND") or "").strip()
+              if dk and dk != "manual":
+                  kind = dk                          # 'pre-open' / 'pre-close' / 'post-close'
+          elif event == "schedule":
+              if now.hour < 12:                      # the morning cron
                   kind = "pre-open"
               else:                                  # an afternoon cron
                   close = now.replace(hour=16, minute=0, second=0, microsecond=0)
@@ -72,18 +89,18 @@ jobs:
                       kind = "pre-close" if mins >= 0 else "post-close"
                   else:
                       run = "no"
-              # Idempotency: with several staggered pre-close crons, only the FIRST that lands should
-              # do work. If today's afternoon refresh already committed seed.db, skip this attempt.
-              # Boundary = 18:00 UTC today: well after the morning run (~13 UTC), before the
-              # earliest afternoon cron (19:20 UTC), so only an afternoon refresh trips this.
-              if run == "yes" and kind in ("pre-close", "post-close"):
-                  since = now.astimezone(ZoneInfo("UTC")).replace(
-                      hour=18, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
-                  log = subprocess.run(
-                      ["git", "log", "--since", since, "--pretty=%H", "--", "data/seed.db"],
-                      capture_output=True, text=True).stdout.strip()
-                  if log:
-                      run, kind = "no", "already-refreshed"
+          # Idempotency (schedule AND dispatch): once today's afternoon refresh has committed
+          # seed.db, later pre-/post-close attempts no-op — so staggered crons and an external
+          # trigger firing together never double-refresh. Boundary = 18:00 UTC today: after the
+          # morning run (~13 UTC), before the earliest afternoon cron (19:20 UTC).
+          if run == "yes" and kind in ("pre-close", "post-close"):
+              since = now.astimezone(ZoneInfo("UTC")).replace(
+                  hour=18, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
+              log = subprocess.run(
+                  ["git", "log", "--since", since, "--pretty=%H", "--", "data/seed.db"],
+                  capture_output=True, text=True).stdout.strip()
+              if log:
+                  run, kind = "no", "already-refreshed"
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"run={run}\nkind={kind}\n")
           print(f"event={event} ET={now:%Y-%m-%d %H:%M} -> run={run} kind={kind}")
