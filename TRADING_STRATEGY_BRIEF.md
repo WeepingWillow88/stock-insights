@@ -79,9 +79,16 @@ Even a perfect setup gets held back or shrunk if:
 | --- | --- |
 | **Earnings** within 3 days | Don't buy (too unpredictable) |
 | Big **macro event** within 2 days (inflation data, Fed decision, jobs report) | Cut position size in half |
-| **Negative news** on the stock | Don't buy |
+| **Strongly negative sentiment** on the stock | Don't buy (BUY → HOLD) |
+| **Strong negative post-earnings gap** (already reported, sold off hard) | Don't buy — the drift is against you |
 | Overall market is **"risk-off"** (fear high) | Don't buy |
 | Market merely **"cautious"** | Buy half-size |
+
+> **Post-earnings drift (PEAD)** is the one place an earnings *result* helps rather than
+> blocks: once a stock **has** reported, a strong beat the market rewarded with a gap-up
+> tends to keep drifting up for weeks (and a big miss keeps sinking). A positive drift
+> *adds* to conviction; a negative one subtracts, and a strong down-gap vetoes a fresh buy.
+> It only nudges an otherwise-valid setup — the technicals still lead.
 
 ---
 
@@ -113,9 +120,15 @@ Five independent health checks, each worth exactly **20%**. A stock needs **≥ 
 | Healthy RSI (between 45 and 70) | 20% |
 | **News is not negative** | 20% |
 
-> ⚠️ **Note on news:** it can only ever *subtract* — positive news doesn't add points.
-> And because 75% = 4 of 5 checks, negative news alone doesn't block a buy; it just
-> **removes your margin for error** on the technicals.
+> ⚠️ **Note on sentiment:** it can only ever *subtract* — positive sentiment doesn't add
+> points. And because 75% = 4 of 5 checks, negative sentiment alone doesn't block a buy;
+> it just **removes your margin for error** on the technicals. (The sentiment read itself
+> comes from **StockTwits crowd mood**, reinforced by **Alpha Vantage** article-level news
+> on the actionable names — see the sentiment note below.)
+>
+> **Post-earnings drift** adjusts conviction *outside* the 5 checks: a fresh positive drift
+> adds points and a negative one subtracts, so a name can clear or miss the 75% bar on the
+> strength of how it reacted to its last earnings report.
 
 ### Everything else — hard gates (no weight, just pass/fail)
 Failing **any single one** of these blocks the buy entirely — so they behave like
@@ -185,25 +198,27 @@ neutral ✅ → **BUY confirmed.**
 
 ### Now change one thing: the news turns negative
 
-Say the keyword scanner flags NVDA's headlines as **negative** (e.g. it counted words
-like *"probe", "cut", "weak"*). Two things happen:
+Say the crowd turns **bearish** on NVDA (StockTwits tags skew negative, and — since NVDA
+is an actionable name — the Alpha Vantage article-level read agrees). Two things happen:
 
 1. **Conviction drops to 80%** (4 of 5 checks) — still above the 75% bar, so NVDA can
-   *still* be bought. News alone didn't kill it.
+   *still* be bought. Sentiment alone didn't kill it.
 2. **But the position gets shrunk.** The engine's "edge-weighted sizing" scales size by
    how far conviction clears the 75% floor:
    - At 100% conviction → full size (46 shares)
    - At 80% conviction → **~60% size (≈ 27 shares)** — smaller bet on a shakier setup.
 
-And if the news were **strongly** negative (an "avoid" signal — sentiment very negative
-across several headlines), the BUY would be **downgraded to HOLD outright**, no matter
-how good the technicals looked.
+And if sentiment were **strongly** negative (an "avoid" signal — the crowd very bearish,
+or a bearish article-level read on the day's actionable names), the BUY would be
+**downgraded to HOLD outright**, no matter how good the technicals looked.
 
-> 💡 **This is exactly where the keyword-vs-Claude gap bites.** Today's keyword scanner
-> can misread a headline like *"recession fears ease"* as negative, needlessly shrinking
-> or skipping a good trade — or miss a genuinely bad story it has no words for. Until
-> Claude is wired in, treat the news layer as a **faint, occasionally-wrong nudge**, and
-> assume the decision is really being driven by the price/trend/momentum technicals.
+> 💡 **Why crowd + article sentiment, not headline keywords.** The signal is driven by
+> **StockTwits crowd mood** (what traders are actually saying — it reads market sentiment
+> directly, without trying to parse a headline snippet), reinforced by **Alpha Vantage**
+> article-level news on the actionable names (scored over the *full article*, so a stock
+> merely mentioned doesn't skew it). Separately, a once-daily **Claude insight** gives a
+> plain-English read of each name's headlines for context (display-only — it doesn't move
+> the signal). A keyword scan survives only as a last-resort fallback.
 
 ---
 
@@ -211,7 +226,10 @@ how good the technicals looked.
 
 This is arguably the best-designed part of the whole system.
 
-- 💰 **Fixed pot:** £50,000, max **8 positions** at once (no single stock dominates)
+- 💰 **Pot:** £50,000 by default (adjustable via the `CAPITAL_GBP` setting), max **8 positions**
+  at once (no single stock dominates). *Caveat: the 8-position cap is applied to each run's fresh
+  picks, not enforced across your running holdings — so following every BUY on top of names you
+  already hold can drift above 8. Mind your total open count.*
 - 🛑 **Every trade risks at most 1.5% (£750).** It sizes each position so that *if the
   stop-loss triggers, the loss can't exceed £750.*
 
@@ -276,8 +294,10 @@ This is arguably the best-designed part of the whole system.
    - The back-test uses **only** the technical signals, while the *live* system also
      applies news and macro filters — so the tested edge and the real behaviour aren't
      the same thing.
-7. **Coarse scoring.** Conviction is a blunt 5-point scale, and news can only ever
-   *hurt* a score, never help.
+7. **Coarse scoring.** Conviction is a blunt 5-point scale, and sentiment can only ever
+   *hurt* a score, never help. The sentiment inputs are decent (StockTwits crowd mood +
+   Alpha Vantage article-level news, with a Claude insight for colour), but they still feed
+   a single binary "not negative" check rather than a graded contribution.
 
 ---
 
