@@ -236,22 +236,72 @@ def pending_sells_view(prices, cfg):
     return pd.DataFrame(rows)
 
 
+def _is_legacy(led):
+    """Closed rows written before the two-phase lifecycle shipped (2026-08-25).
+
+    Those exits were booked by the old single-phase logic: it wrote exit_date straight onto the
+    row without recording *why*, and priced the fill under a different cost assumption than
+    update_open_positions uses now. They are still real trades, but their R is not computed the
+    same way as a modern one, so they must not be silently averaged in as like-for-like.
+
+    Detected by the absence of `sell_signal_date` rather than by a hard-coded date: every exit the
+    two-phase code books stamps that column, so the test stays correct as the ledger grows."""
+    if led.empty:
+        return led.index[:0]
+    ssd = led["sell_signal_date"] if "sell_signal_date" in led.columns else None
+    if ssd is None:
+        return led.index[led["status"] == "closed"]
+    blank = ssd.isna() | (ssd.astype(str).str.strip().isin(["", "None", "NaT", "nan"]))
+    return led.index[(led["status"] == "closed") & blank]
+
+
 def stats(cfg):
     led = _load(cfg)
     closed = led[led["status"] == "closed"] if not led.empty else led
     n_open = int((led["status"] == "open").sum()) if not led.empty else 0
+    # A position flagged for exit is neither 'open' nor 'closed'. It used to be counted in neither
+    # tally, so a trade stuck mid-lifecycle (the finalising run never landed) vanished from the
+    # scorecard entirely along with its risk. Surface it explicitly instead.
+    pend = led[led["status"] == "sell_pending"] if not led.empty else led
+    n_pending = int(len(pend))
+    pending_risk = round(float(pd.to_numeric(pend["risk_gbp"], errors="coerce").fillna(0).sum()), 0) \
+        if n_pending else 0.0
+    pending_tickers = list(pend["ticker"]) if n_pending else []
+    # How long has the oldest pending exit been waiting? A value above a day or two means the
+    # finalising run isn't happening — the trade is frozen, not merely queued.
+    pending_since = min((str(d) for d in pend["sell_signal_date"] if d and not pd.isna(d)),
+                        default=None) if n_pending else None
     if closed.empty:
-        return {"closed": 0, "open": n_open, "note": "Building the track record — no trades "
+        return {"closed": 0, "open": n_open, "pending": n_pending,
+                "pending_risk_gbp": pending_risk, "pending_tickers": pending_tickers,
+                "pending_since": pending_since,
+                "note": "Building the track record — no trades "
                 "have closed yet. Check back after a few runs."}
+    legacy_idx = _is_legacy(led)
+    legacy = closed.loc[closed.index.intersection(legacy_idx)]
+    modern = closed.drop(index=legacy.index, errors="ignore")
     r = closed["r_multiple"].astype(float)
     wins = closed[r > 0]
-    return {
+    out = {
         "closed": int(len(closed)), "open": n_open,
+        "pending": n_pending, "pending_risk_gbp": pending_risk,
+        "pending_tickers": pending_tickers, "pending_since": pending_since,
         "win_rate": round(len(wins) / len(closed) * 100, 1),
         "expectancy_r": round(float(r.mean()), 3),
         "avg_win_r": round(float(r[r > 0].mean()), 2) if (r > 0).any() else 0.0,
         "avg_loss_r": round(float(r[r <= 0].mean()), 2) if (r <= 0).any() else 0.0,
         "total_r": round(float(r.sum()), 2),
+        # Same figures over only the trades booked by the current exit model, so the headline can
+        # be caveated honestly when the two cohorts are mixed.
+        "legacy": int(len(legacy)),
+        "legacy_tickers": list(legacy["ticker"]),
+        "comparable": int(len(modern)),
         "note": "Live results from recommendations this app actually logged (includes news + "
                 "macro layers, unlike the backtest).",
     }
+    if len(modern):
+        rm = modern["r_multiple"].astype(float)
+        out["total_r_comparable"] = round(float(rm.sum()), 2)
+        out["expectancy_r_comparable"] = round(float(rm.mean()), 3)
+        out["win_rate_comparable"] = round(float((rm > 0).sum()) / len(rm) * 100, 1)
+    return out

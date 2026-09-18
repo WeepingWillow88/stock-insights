@@ -135,6 +135,19 @@ def intraday_stale(iso):
         return "today's data hasn't loaded yet — you're seeing a previous day's run"
     return ""
 
+
+def _age_days(iso):
+    """Calendar days since `iso`, or None if it can't be parsed. Used to tell a single dropped run
+    apart from an automation outage — the two need very different advice.
+
+    Counts whole dates rather than 24h blocks so this agrees with the ledger's own "flagged N days
+    ago" wording; a time delta would truncate (17.9 days -> 17) and read as an off-by-one next to it."""
+    try:
+        return (dt.date.today() - dt.datetime.fromisoformat(str(iso)).date()).days
+    except Exception:  # noqa: BLE001 - unparseable timestamp: caller falls back to the coarse flags
+        return None
+
+
 st.title("📈 High-Beta Stock Insights")
 st.caption("Decision-support only. Not financial advice. You place every trade yourself.")
 
@@ -212,7 +225,21 @@ if _run_kind and not pd.isna(_run_kind):
     _bits.append(f"via {_run_kind}")
 _fresh_line = "  ·  ".join(_bits)
 _intraday_reason = intraday_stale(_last_updated)
-if _intraday_reason:
+_age = _age_days(_last_updated)
+# Beyond a long weekend, "a refresh was dropped" is the wrong diagnosis: the schedule itself has
+# stopped, and pulling prices by hand patches the symptom while the signals, news and ledger stay
+# frozen. Say so, and point at the thing that actually needs fixing.
+if _age is not None and _age >= 3:
+    st.error(
+        # Deliberately no day count here — `_fresh_line` already carries the age, and a second
+        # figure derived a different way (calendar dates vs elapsed time) reads as a contradiction.
+        _fresh_line + "  —  🛑 **The automated refresh has stopped.** This is an "
+        "outage, not a late run: signals, news and the track-record ledger are all frozen at the "
+        "date above, and any position flagged for exit is stuck mid-trade. **⬇️ Pull fresh prices** "
+        "updates prices only — it does not re-run the pipeline or advance the ledger. Fix the "
+        "schedule: check the repo's **Actions** tab for failed or missing runs and its **Issues** "
+        "tab for an auto-filed *“Scheduled data refresh failed”* report.")
+elif _intraday_reason:
     st.error(_fresh_line + f"  —  ⚠️ **{_intraday_reason}.** A scheduled refresh was likely dropped "
              "or delayed. Open the 📰 Macro & News tab and hit **⬇️ Pull fresh prices** to update now.")
 elif upd_stale:
@@ -837,6 +864,46 @@ with tab_track:
         c[3].metric("Avg win / loss", f"{ls['avg_win_r']:+.1f}R / {ls['avg_loss_r']:+.1f}R")
         c[4].metric("Total", f"{ls['total_r']:+.1f}R")
         st.caption(ls.get("note", ""))
+        # Trades booked before the two-phase exit shipped used a different cost model and recorded
+        # no exit reason. Averaging them in with modern ones without saying so overstates how
+        # like-for-like the record is, so name them and show the comparable subset alongside.
+        if ls.get("legacy"):
+            _lt = ", ".join(f"**{t}**" for t in ls.get("legacy_tickers", []))
+            _msg = (f"⚠️ **{ls['legacy']} of {ls['closed']} closed trades pre-date the current exit "
+                    f"model** ({_lt}). They were booked by the older single-phase logic, which "
+                    "recorded **no exit reason** and priced the fill under a different cost "
+                    "assumption — so their R is not directly comparable with the rest.")
+            if ls.get("comparable"):
+                _msg += (f"  On the **{ls['comparable']}** trade(s) booked the current way: "
+                         f"**{ls['total_r_comparable']:+.2f}R** total, "
+                         f"**{ls['expectancy_r_comparable']:+.2f}R** average, "
+                         f"**{ls['win_rate_comparable']}%** win rate.")
+            else:
+                _msg += "  No trades have yet closed under the current model."
+            st.warning(_msg)
+        # A position flagged for exit but never finalised is invisible in both tallies above. Show
+        # it, and escalate when it has been stuck long enough to mean the refresh has stopped.
+        if ls.get("pending"):
+            _pt = ", ".join(f"**{t}**" for t in ls.get("pending_tickers", []))
+            _stuck = ""
+            _since = ls.get("pending_since")
+            if _since:
+                try:
+                    _days = (dt.date.today() - dt.date.fromisoformat(str(_since)[:10])).days
+                    _stuck = f" — flagged **{_since}** ({_days} day{'s' if _days != 1 else ''} ago)"
+                except Exception:  # noqa: BLE001 - unparseable date: fall back to no age
+                    _days = 0
+            else:
+                _days = 0
+            _body = (f"🔴 **{ls['pending']} position(s) awaiting exit:** {_pt}{_stuck}. "
+                     f"£{ls['pending_risk_gbp']:,.0f} of risk is still live and is **not** counted "
+                     "in either the open or the closed figures above.")
+            if _days >= 3:
+                st.error(_body + "  A pending sell should finalise on the **next** run, so this one "
+                         "is **stuck** — the scheduled refresh has almost certainly stopped. Check "
+                         "the repo's Actions tab and Issues tab.")
+            else:
+                st.info(_body + "  It closes at the next session's price on the following run.")
 
     if not ledger_df.empty:
         opn = ledger_df[ledger_df["status"] == "open"]

@@ -77,25 +77,34 @@ jobs:
               if dk and dk != "manual":
                   kind = dk                          # 'pre-open' / 'pre-close' / 'post-close'
           elif event == "schedule":
-              if now.hour < 12:                      # the morning cron
+              # DO NOT infer intent from the delivery time. GitHub delivered every cron in this
+              # repo 2.5-5 HOURS late through Sep 2026: the 08:45 ET pre-open cron landed at
+              # 12:35-13:54 ET and the pre-close crons at 17:33-19:14 ET. Against the old
+              # +60/-20-minute window around the close, that skipped 100% of runs from 2026-09-01
+              # to 2026-09-18 — silently, because a gated-off job still reports success.
+              # So: accept the trigger whenever it arrives inside a sane daily band, label it by
+              # which half of the day it lands in, and let the idempotency check below (not the
+              # clock) be the thing that prevents a double refresh.
+              if now.hour < 15:                      # the morning cron, however late it arrives
                   kind = "pre-open"
-              else:                                  # an afternoon cron
+              elif now.hour < 23:
                   close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-                  mins = (close - now).total_seconds() / 60   # +ve before close, -ve after
-                  # Wide window so a delayed/early GitHub delivery still lands: 60 min before the
-                  # close through 20 min after. The wrong season's crons fire far outside this and
-                  # are skipped. Runs after the bell are still useful (final EOD prices).
-                  if -20 <= mins <= 60:
-                      kind = "pre-close" if mins >= 0 else "post-close"
-                  else:
-                      run = "no"
-          # Idempotency (schedule AND dispatch): once today's afternoon refresh has committed
-          # seed.db, later pre-/post-close attempts no-op — so staggered crons and an external
-          # trigger firing together never double-refresh. Boundary = 18:00 UTC today: after the
-          # morning run (~13 UTC), before the earliest afternoon cron (19:20 UTC).
-          if run == "yes" and kind in ("pre-close", "post-close"):
-              since = now.astimezone(ZoneInfo("UTC")).replace(
-                  hour=18, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
+                  kind = "pre-close" if now < close else "post-close"
+              else:
+                  run = "no"                         # overnight: leave it for tomorrow's pre-open
+          # Idempotency (schedule AND dispatch): once a slot has committed seed.db, later attempts
+          # for that same slot no-op — so staggered crons, a late delivery and an external trigger
+          # firing together never double-refresh.
+          #
+          # Anchor the look-back to the ET calendar day, NOT to UTC. Past ~20:00 ET the UTC date has
+          # already rolled over, so a UTC `replace(hour=...)` names a slot on TOMORROW — a future
+          # timestamp that no commit can predate, which silently re-enables every late trigger.
+          # Morning slot looks back to 00:00 ET; afternoon slot to 15:00 ET, late enough to sit
+          # after even a badly-delayed pre-open run so the afternoon refresh still fires.
+          if run == "yes" and event == "schedule":
+              anchor = now.replace(hour=(0 if kind == "pre-open" else 15),
+                                   minute=0, second=0, microsecond=0)
+              since = anchor.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%S")
               log = subprocess.run(
                   ["git", "log", "--since", since, "--pretty=%H", "--", "data/seed.db"],
                   capture_output=True, text=True).stdout.strip()
@@ -156,6 +165,31 @@ jobs:
           done
           echo "::error::Failed to push refreshed seed.db after 5 attempts."
           exit 1
+
+      # A gated-off run still reports SUCCESS, so between 2026-09-01 and 2026-09-18 this workflow
+      # went green ~3x a day while committing nothing and the live app served 18-day-old prices.
+      # Nothing was failing, so `notify-failure` never fired and no issue was ever opened.
+      # This step closes that hole: it runs whatever the gate decided, and fails the job when the
+      # committed data has gone stale — which is what actually matters to the app. It runs LAST,
+      # so a run that just refreshed successfully sees an age of 0 and passes.
+      - name: Fail if the committed data has gone stale
+        if: always()
+        env:
+          MAX_AGE_DAYS: 3
+        run: |
+          last=$(git log -1 --format=%ct -- data/seed.db || true)
+          if [ -z "$last" ]; then
+            echo "::error::No commit for data/seed.db in the fetched history (depth 30) —" \
+                 "treating as stale. Widen fetch-depth or check the refresh."
+            exit 1
+          fi
+          age=$(( ( $(date +%s) - last ) / 86400 ))
+          echo "Last data/seed.db commit was ${age} day(s) ago (limit ${MAX_AGE_DAYS})."
+          if [ "$age" -ge "$MAX_AGE_DAYS" ]; then
+            echo "::error::Market data is ${age} days old. The refresh is not landing —" \
+                 "check the gate decision in the 'Decide whether to run' step of recent runs."
+            exit 1
+          fi
 
   # If the refresh above failed at any step, the app's data silently goes stale — nobody would
   # know without checking the "as of" timestamp. Open (or bump) a GitHub issue so a missed run
