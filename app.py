@@ -637,7 +637,11 @@ with tab_news:
                           "trading day. Slower (~3–5 min). News sentiment is REUSED from the last "
                           "scheduled run (no new Claude calls). Note: on the hosted app this updates "
                           "your current session only; the scheduled daily job updates the shared "
-                          "baseline everyone sees."):
+                          "baseline everyone sees. This runs the FULL pipeline, so it also opens "
+                          "and closes positions in the track-record ledger — and those writes are "
+                          "session-only too. Any trade it logs disappears when the app sleeps or "
+                          "redeploys, and the next scheduled run starts from the shared ledger as "
+                          "if it never happened. Treat what it shows as a preview, not a record."):
             from src import pipeline
             with st.spinner("Downloading fresh prices for the full universe and rebuilding — "
                             "this can take a few minutes…"):
@@ -654,7 +658,12 @@ with tab_news:
                "before the open and after the close — that's when the AI news scoring runs. "
                "**Refresh signals & regime** rebuilds signals on cached prices; **Pull fresh prices** "
                "re-downloads price history and advances the market-data date. Both reuse the latest "
-               "scheduled news read (no extra AI cost). Locally you can also run `python -m src.pipeline`.")
+               "scheduled news read (no extra AI cost). Locally you can also run `python -m src.pipeline`.  \n"
+               "⚠️ **On the hosted app, both buttons write to the track-record ledger for your "
+               "session only.** Positions they open or close vanish when the app sleeps or "
+               "redeploys, and the next scheduled run carries on from the shared ledger as though "
+               "they never happened — so treat anything they add as a preview, not a logged trade. "
+               "Only the scheduled job writes the record everyone sees.")
 
     # ---- The market backdrop ----
     st.markdown("### 🌡️ The market backdrop")

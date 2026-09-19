@@ -194,7 +194,16 @@ def open_positions_view(prices, cfg):
         sma = closes.rolling(cfg.trend_exit_sma).mean().iloc[-1]
         trend_ok = not pd.notna(sma) or current >= float(sma)
         action, reason = "HOLD", "trend intact, above the trailing stop"
-        if current <= trail:
+        if bars.empty:
+            # Bought today — no session has closed since entry. `_first_exit` (which sets
+            # sell_pending) looks only at bars strictly AFTER record_date, so it cannot flag a
+            # same-day buy. Without this guard the two disagree: a name bought today that closes
+            # below its 20-day average reads SELL here, while staying out of the '🔴 SELL these'
+            # list (that reads `status`) and remaining in '🟢 BUY these' — the same name showing
+            # as both a buy and a sell on the same screen. Defer to the ledger until it has
+            # traded a full session, so every view answers from the same exit model.
+            action, reason = "HOLD", "bought today — no session has closed since entry yet"
+        elif current <= trail:
             action, reason = "SELL", "at/through the trailing stop"
         elif pd.notna(sma) and current < float(sma):
             action, reason = "SELL", f"closed below its {cfg.trend_exit_sma}-day average (trend break)"
