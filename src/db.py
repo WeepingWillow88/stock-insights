@@ -49,6 +49,42 @@ def bootstrap_working_db(db_path, seed_path="data/seed.db", refresh_if_newer=Fal
     return False
 
 
+def sync_backtest_from_seed(db_path, seed_path="data/seed.db"):
+    """Copy the backtest_* result tables from the shipped snapshot when its backtest is newer.
+
+    The backtest runs offline and ships inside the seed, but a long-running Cloud container keeps
+    its own working DB and only re-seeds it when the seed has newer *market* data — so a freshly
+    shipped backtest would otherwise wait for the next price refresh. This moves just those tables,
+    leaving prices, signals and the ledger alone. Returns True if anything was copied."""
+    if not os.path.exists(seed_path) or not os.path.exists(db_path) \
+            or os.path.abspath(seed_path) == os.path.abspath(db_path):
+        return False
+
+    def generated(path):
+        try:
+            conn = sqlite3.connect(path)
+            try:
+                row = conn.execute("SELECT generated FROM backtest_summary LIMIT 1").fetchone()
+                return str(row[0]) if row and row[0] else ""
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 - no table / old schema
+            return ""
+
+    if not generated(seed_path) or generated(seed_path) <= generated(db_path):
+        return False
+    src = sqlite3.connect(seed_path)
+    try:
+        tables = [r[0] for r in src.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'backtest_%'")]
+        frames = {t: pd.read_sql_query(f"SELECT * FROM {t}", src) for t in tables}
+    finally:
+        src.close()
+    for t, df in frames.items():
+        write_df(df, t, db_path)
+    return True
+
+
 def get_connection(db_path):
     parent = os.path.dirname(db_path)
     if parent:

@@ -4,11 +4,27 @@ Run with:  streamlit run app.py
 (Populate data first with:  python -m src.pipeline)
 """
 import datetime as dt
+import importlib
 import os
 import sqlite3
+import sys
 
 import pandas as pd
 import streamlit as st
+
+# Streamlit Cloud applies a git push by re-running this script in the SAME Python process: app.py
+# is re-read, but the src/ modules imported before the push stay cached in sys.modules, so new app
+# code can call functions the stale modules don't have. If any project module's file changed since
+# it was loaded, re-import them all — in dependency order, so `from .config import CONFIG` and
+# cross-module references pick up the fresh code too.
+_SRC = ["config", "db", "data", "universe", "metrics", "screen", "regime", "events", "news", "av",
+        "pead", "marketdata", "signals", "ledger", "notify", "shock", "backtest", "pipeline"]
+_loaded = [sys.modules[f"src.{n}"] for n in _SRC if f"src.{n}" in sys.modules]
+if any(getattr(m, "_loaded_mtime", None) != os.path.getmtime(m.__file__) for m in _loaded):
+    for _m in _loaded:
+        importlib.reload(_m)
+for _m in _loaded:
+    _m._loaded_mtime = os.path.getmtime(_m.__file__)
 
 from src.config import CONFIG
 
@@ -25,7 +41,10 @@ except Exception:  # noqa: BLE001 - no secrets file locally is fine
 # a later market date than a stale in-container copy. (Shared with the pipeline — see db.py.)
 from src import db as _db
 from src import ledger as _ledger
-_db.bootstrap_working_db(CONFIG.db_path, "data/seed.db", refresh_if_newer=True)
+_reseeded = _db.bootstrap_working_db(CONFIG.db_path, "data/seed.db", refresh_if_newer=True)
+_reseeded = _db.sync_backtest_from_seed(CONFIG.db_path, "data/seed.db") or _reseeded  # new backtest
+for _m in (_db, _ledger, sys.modules["src.config"]):
+    _m._loaded_mtime = os.path.getmtime(_m.__file__)
 
 # --- Optional password gate (set APP_PASSWORD in Streamlit secrets to enable) ---
 _pw = os.environ.get("APP_PASSWORD")
@@ -49,6 +68,10 @@ def load_table(table):
         return pd.DataFrame()
     finally:
         conn.close()
+
+
+if _reseeded:
+    load_table.clear()   # the DB was just re-seeded underneath any cached tables
 
 
 SIG_EMOJI = {"BUY": "🟢 BUY", "SELL": "🔴 SELL", "HOLD": "🟡 HOLD"}
