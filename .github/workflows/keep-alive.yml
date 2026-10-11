@@ -8,21 +8,34 @@ name: Keep Streamlit app awake
 # So this opens the page in headless Chromium (a real visit) and, if the "Zzzz" sleep page is
 # showing, clicks "Yes, get this app back up!" and waits for the app to come back.
 #
-# Every 6 hours keeps us well inside the 12-hour window even if GitHub delivers a cron late.
+# Why HOURLY when the limit is 12h: GitHub's scheduler is best-effort, and for this repo it is
+# badly behind. Over 2026-09-21..10-09 it delivered only 45 of refresh-data's 105 scheduled
+# triggers (43%), a median 3.0h late and up to 6.3h late. A 6-hourly cron at that hit rate leaves
+# 12h+ gaps routinely. Hourly, off the top of the hour (GitHub's busiest moment), keeps the
+# expected gap far inside the window even when most triggers are dropped or late. Public repo,
+# so the minutes are free.
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "23 * * * *"
   workflow_dispatch:
+
+# Late deliveries can bunch up; one visit is as good as five, so drop the stale ones.
+concurrency:
+  group: keep-alive
+  cancel-in-progress: true
 
 jobs:
   ping:
-    runs-on: ubuntu-latest
+    # Pinned: `playwright install --with-deps` needs a distro Playwright supports, and
+    # ubuntu-latest moves to Ubuntu 26 from 2026-10-19.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       APP_URL: https://stock-insights-uq7jzremi79p9ib38tkc7h.streamlit.app/
+      APP_MARKER: High-Beta Stock Insights   # the app's own st.title — proves app.py actually ran
     steps:
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -34,38 +47,68 @@ jobs:
       - name: Visit the app (and wake it if asleep)
         run: |
           python - <<'PY'
-          import os, sys
+          import os, sys, time
           from playwright.sync_api import sync_playwright
 
-          URL = os.environ["APP_URL"]
+          URL, MARKER = os.environ["APP_URL"], os.environ["APP_MARKER"]
           WAKE = "get this app back up"
 
-          def find_wake_button(page):
-              # The sleep page can render on the outer page or inside the app iframe — check both.
+          def find(page, make):
+              # The sleep page and the app can each render on the outer page or inside the
+              # /~/+/ iframe — check every frame.
               for frame in page.frames:
-                  btn = frame.get_by_role("button", name=WAKE)
-                  if btn.count():
-                      return btn.first
+                  try:
+                      loc = make(frame)
+                      if loc.count():
+                          return loc.first
+                  except Exception:
+                      pass  # a frame can detach mid-scan while the app boots
               return None
 
+          wake_button = lambda f: f.get_by_role("button", name=WAKE)
+          app_title = lambda f: f.get_by_text(MARKER)
+
+          def wait_for(page, make, seconds):
+              deadline = time.time() + seconds
+              while time.time() < deadline:
+                  if find(page, make):
+                      return True
+                  page.wait_for_timeout(2_000)
+              return False
+
           with sync_playwright() as p:
-              browser = p.chromium.launch()
+              browser = p.chromium.launch(channel=os.environ.get("PW_CHANNEL") or None)
               page = browser.new_page()
               page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
-              page.wait_for_timeout(15_000)          # let the iframe + websocket connect
 
-              btn = find_wake_button(page)
-              if btn:
-                  print("App was asleep — clicking wake button.")
-                  btn.click()
-                  page.wait_for_timeout(5_000)
-                  if find_wake_button(page):
-                      print("::error::Wake button still showing after click.")
+              # Wait for whichever shows first: the app itself, or the sleep page.
+              state, deadline = None, time.time() + 90
+              while state is None and time.time() < deadline:
+                  if find(page, app_title):
+                      state = "awake"
+                  elif find(page, wake_button):
+                      state = "asleep"
+                  else:
+                      page.wait_for_timeout(2_000)
+
+              if state == "asleep":
+                  # Visible in the run summary: if this ever shows up, visits aren't landing often
+                  # enough to stop the sleep and the schedule needs a look.
+                  print("::warning::App was ASLEEP when visited — waking it.")
+                  find(page, wake_button).click()
+                  if not wait_for(page, app_title, 300):
+                      print("::error::Clicked wake, but the app did not come back within 5 minutes.")
                       sys.exit(1)
-                  page.wait_for_timeout(90_000)      # stay connected while it boots
-                  print("Wake requested; app should be back up.")
+                  print("App woken and serving again.")
+              elif state is None:
+                  # Not the app, not the sleep page: an error page, a changed sleep page, a block.
+                  # Fail loudly rather than report a visit that may not have counted.
+                  print("::error::Neither the app nor the sleep page appeared within 90s.")
+                  print(page.inner_text("body")[:500])
+                  sys.exit(1)
               else:
-                  page.wait_for_timeout(20_000)      # stay connected so the visit registers
-                  print("App was awake — visit registered.")
+                  print("App is awake and serving — visit registered.")
+
+              page.wait_for_timeout(20_000)  # stay connected so the session counts as traffic
               browser.close()
           PY
