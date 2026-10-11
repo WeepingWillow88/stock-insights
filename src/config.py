@@ -94,14 +94,15 @@ class Config:
     rsi_period: int = 14
     rsi_overbought: float = 70.0
     rsi_min_buy: float = 45.0      # below this, momentum too weak to enter
-    # Entry-quality gates — make live BUYs match the backtested (validated) rules:
+    # Entry-quality gates — shared by live signals AND the backtest (signals.entry_gate_failures):
     min_conviction: int = 75            # only BUY when >= this % of independent checks agree
     require_rel_strength: bool = True   # only BUY names beating the S&P (3-month relative strength)
     require_volume_confirm: bool = True # only BUY on above-average volume (confirmation)
     # Exit model — shared by the live ledger AND the backtest: trailing stop + trend break
     trail_atr_mult: float = 2.5         # trail the stop this many ATRs below the run-up high
     trend_exit_sma: int = 20            # also exit if price closes below this SMA (trend break)
-    # Portfolio construction
+    # Portfolio construction — max_positions, max_per_sector, the heat cap and the correlation cap all
+    # count positions you ALREADY hold (open or pending sale), not just the day's fresh picks.
     max_position_correlation: float = 0.80  # don't add a pick this correlated with one already held
     corr_window: int = 60                    # trading days of returns used for the correlation cap
     # Edge-weighted sizing: scale size by confidence (a fractional-Kelly proxy), never above full risk
@@ -168,23 +169,19 @@ class Config:
     shock_move_pct: float = 0.05          # a >=5% intraday move triggers a news look
 
     # --- Backtester + track-record ledger ---
+    # The backtest replays the LIVE rules — same entry gates (min_conviction, require_rel_strength,
+    # require_volume_confirm), composite regime gate, sizing, portfolio caps, exit model and fills —
+    # so there are deliberately no backtest-only rule settings here.
+    max_hold_days: int = 15               # time-limit exit, shared by the live ledger AND the backtest
     backtest_years: str = "10y"           # how much history to replay (incl. bear markets)
-    backtest_universe_max: int = 120      # cap to the most liquid high-beta names for speed
-    backtest_max_hold_days: int = 40      # backstop time exit (trailing/trend exits do the work)
     backtest_cost_pct: float = 0.001      # base round-trip slippage + commission per trade
     backtest_spread_atr_coef: float = 0.05  # realistic extra cost = this x ATR% (jumpy names cost
     #                                         more to trade — wider spreads/slippage). Applied in
     #                                         the backtest AND the live ledger for an honest R.
-    # Improved exits (1): trailing stop + trend-break instead of a fixed time clock
-    # (trailing-stop + trend-break exit params are shared with live signals — see trail_atr_mult
-    #  / trend_exit_sma above)
-    # Higher-quality entries (2) + regime gate (3)
-    backtest_min_conviction: int = 75     # only take setups where >= this % of checks agree
-    backtest_use_regime: bool = True      # only buy when the S&P 500 is in an uptrend
-    backtest_use_rs: bool = True          # only buy if the stock is beating the S&P (rel. strength)
-    backtest_use_volume: bool = True      # only buy on above-average volume (confirmation)
-    backtest_mc_runs: int = 1000          # Monte-Carlo resamples for the robustness range (6)
-    ledger_max_hold_days: int = 15        # close a logged trade after this many trading days
+    cash_ticker: str = "BIL"              # T-bill ETF: the backtest's cash benchmark, and the interest
+    #                                       idle cash earns in the simulated account
+    backtest_random_runs: int = 10        # random-entry baseline: replays with entries on random days
+    backtest_mc_runs: int = 1000          # block-bootstrap resamples for the robustness range
     daily_loss_limit_pct: float = 0.04    # circuit-breaker: warn if today's realized losses exceed this
 
     # --- Ops ---

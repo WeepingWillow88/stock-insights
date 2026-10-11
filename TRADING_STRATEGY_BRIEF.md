@@ -227,9 +227,9 @@ or a bearish article-level read on the day's actionable names), the BUY would be
 This is arguably the best-designed part of the whole system.
 
 - 💰 **Pot:** £50,000 by default (adjustable via the `CAPITAL_GBP` setting), max **8 positions**
-  at once (no single stock dominates). *Caveat: the 8-position cap is applied to each run's fresh
-  picks, not enforced across your running holdings — so following every BUY on top of names you
-  already hold can drift above 8. Mind your total open count.*
+  at once (no single stock dominates). The cap counts everything you already hold — new BUYs only
+  fill *free* slots, and the sector and total-risk limits below include your existing positions
+  too. (A position flagged to sell keeps its slot until the sale fills.)
 - 🛑 **Every trade risks at most 1.5% (£750).** It sizes each position so that *if the
   stop-loss triggers, the loss can't exceed £750.*
 
@@ -262,14 +262,25 @@ This is arguably the best-designed part of the whole system.
    Professionals will tell you *survival* matters more than *being right*.
 3. **Disciplined and unemotional.** The rules fire the same way every day — no
    panic-selling, no chasing.
-4. **Honest with itself.** It back-tests over 10 years, runs *Monte-Carlo* simulations
-   (reshuffling trade history 1,000 times to see the *range* of plausible outcomes,
-   not just the lucky path), checks out-of-sample stability, and models trading costs
-   and slippage. That intellectual honesty is rare and a genuine strength.
+4. **Honest with itself.** Its backtest replays the exact live rules as one £50,000
+   account on the S&P 500 *as it was at the time* (not today's winners), compares the
+   result with simply holding the S&P 500 or cash, tests the entry signal against random
+   entries, and models trading costs. That honesty is rare — and, as below, it's what
+   shows the rules haven't beaten the index.
 
 ---
 
 ## Where It Falls Short ⚠️
+
+### The headline result
+**Replayed honestly, the rules trailed simply holding the index.** From October 2017 to
+October 2026 the backtest turned **£50,000 into about £89,000 (6.6% a year)** — against
+about **£175,000 (15.0% a year)** from holding the S&P 500 and **£62,500** from cash. The
+entry signal does beat chance (about +0.12R per trade versus +0.06R for random entries on
+the same stocks with the same exits), but the account was only ~44% invested on average,
+held trades for about a week, and paid ~4% a year in trading costs — so the small edge per
+trade never added up to market-beating returns. (Figures from the 2026-10-11 run; the app's
+📈 tab always shows the latest.)
 
 ### Design / strategy limits
 1. **It's not actually trading.** The "portfolio" and track record are simulated — the
@@ -288,12 +299,12 @@ This is arguably the best-designed part of the whole system.
 5. **Free, unofficial data source (Yahoo Finance).** It's flaky; extras like options
    data, short-interest, and even earnings dates are "best effort" and often silently
    missing — meaning some safety checks may quietly do nothing.
-6. **The back-test flatters reality in two ways:**
-   - *Survivorship bias* — it tests **today's** S&P 500 winners over 10 years, ignoring
-     companies that failed and dropped out. This makes history look rosier than it was.
-   - The back-test uses **only** the technical signals, while the *live* system also
-     applies news and macro filters — so the tested edge and the real behaviour aren't
-     the same thing.
+6. **The back-test still flatters reality a little:**
+   - *Residual survivorship bias* — it now uses the S&P 500 as it was each month, including
+     86 companies that later left the index, but ~110 former members have no free price
+     history (bankruptcies, most takeovers), so some of the worst outcomes are missing.
+   - The news / sentiment, earnings and macro-event layers can't be replayed (no free
+     history), so those parts of the live system are untested.
 7. **Coarse scoring.** Conviction is a blunt 5-point scale, and sentiment can only ever
    *hurt* a score, never help. The sentiment inputs are decent (StockTwits crowd mood +
    Alpha Vantage article-level news, with a Claude insight for colour), but they still feed
@@ -313,6 +324,8 @@ rigorous risk control. The discipline and self-honesty are genuinely above avera
   punctuated by painful drawdowns. Expect stretches where it loses.
 - Its edge is **modest and fragile** — dependent on flaky free data and a market that
   keeps trending. Real trading costs and taxes eat into it.
+- **It hasn't beaten the index.** The point-in-time backtest returned 6.6% a year against
+  15.0% for the S&P 500 — the bar any stock-picking system has to clear.
 - **It has never been tested with real money.** Simulated results almost always beat
   live results.
 
@@ -321,7 +334,7 @@ Treat it as a strong **decision-support tool and a well-disciplined paper-tradin
 system** — *not* a validated money-maker. Before risking real capital, get:
 
 1. ✅ A reliable **paid data feed**
-2. ✅ A **survivorship-bias-free back-test**
+2. ✅ A **point-in-time back-test** — now built; so far it says the rules trail the index
 3. ✅ A few months of **live paper-trading** matched against the back-test to confirm
    the edge survives contact with reality
 

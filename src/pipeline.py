@@ -87,8 +87,9 @@ def run_pipeline(cfg=CONFIG, send_digest=True, reuse_news=False):
     print(f"      post-earnings drift (PEAD) for {len(pead_map)} names.")
 
     print("      Generating signals + position sizing...")
+    held = ledger.holdings(cfg, sectors)   # current book counts toward the position/sector/heat caps
     sig = signals.build_signals(prices, shortlist, cfg, fx_rate, reg, macro_events,
-                                earnings, news_map, extras_map, pead_map)
+                                earnings, news_map, extras_map, pead_map, held)
     sig["run_date"] = run_date
     sig["fx_rate"] = fx_rate
     n_buy = int((sig["signal"] == "BUY").sum()) if not sig.empty else 0
@@ -261,8 +262,9 @@ def refresh_macro_news(cfg=CONFIG, reuse_news=False):
                   if cfg.fetch_market_extras else {})
     pead_map = (pead.build_pead_map(shortlist["ticker"].tolist(), prices, cfg)
                 if cfg.pead_enabled else {})
+    held = ledger.holdings(cfg, dict(zip(shortlist["ticker"], shortlist["sector"])))
     sig = signals.build_signals(prices, shortlist, cfg, fx_rate, reg, macro_events,
-                                earnings, news_map, extras_map, pead_map)
+                                earnings, news_map, extras_map, pead_map, held)
     sig["run_date"] = run_date
     sig["fx_rate"] = fx_rate
 

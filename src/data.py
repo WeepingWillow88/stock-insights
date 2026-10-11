@@ -33,7 +33,9 @@ def _reshape(raw, batch):
     frames = []
     if raw is None or len(raw) == 0:
         return frames
-    if len(batch) == 1:
+    # Newer yfinance returns (ticker, field) columns even for a one-ticker batch with
+    # group_by="ticker"; only a flat frame takes the single-ticker path (else it comes back empty).
+    if len(batch) == 1 and not isinstance(raw.columns, pd.MultiIndex):
         df = _finalize(raw.copy(), batch[0])
         if df is not None:
             frames.append(df)

@@ -1,8 +1,8 @@
 """Rebuild the slim seed database that ships in the repo (data/seed.db).
 
 The deployed app copies data/seed.db into place on first run, so this snapshot is what
-viewers see. It's the working DB minus the heavy 10-year backtest price cache, so it stays
-small (~9 MB) and git-friendly.
+viewers see. It's the working DB minus the heavy backtest caches (10-year prices + the S&P 500
+membership history), so it stays small (~9 MB) and git-friendly. The backtest *results* ship.
 
 Update the shared baseline in two commands:
     python -m src.pipeline      # (or hit Refresh) to pull fresh data
@@ -15,7 +15,8 @@ import sqlite3
 from src.config import CONFIG
 
 DST = "data/seed.db"
-DROP_TABLES = ["backtest_prices", "backtest_meta"]  # huge raw price cache — regenerated on demand
+# Caches regenerated on demand by `python -m src.backtest` (raw prices, membership snapshots).
+DROP_TABLES = ["backtest_prices", "backtest_meta", "sp500_snapshots"]
 
 
 def main():

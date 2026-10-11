@@ -200,9 +200,9 @@ events_df = load_table("macro_events")
 news_df = load_table("news")
 ledger_df = load_table("ledger")
 bt_summary_df = load_table("backtest_summary")
-bt_trades_df = load_table("backtest_trades")
 bt_sens_df = load_table("backtest_sensitivity")
 bt_year_df = load_table("backtest_by_year")
+bt_equity_df = load_table("backtest_equity")
 meta_df = load_table("meta")
 
 if shortlist.empty:
@@ -293,11 +293,15 @@ with st.sidebar:
     st.markdown("---")
 
 # Apply the capital / max-positions what-if to the displayed signals (offline, no re-run, no
-# ledger write). A no-op at the default settings; needs the stop_dist/eff_mult helper columns.
+# ledger write); needs the stop_dist/eff_mult helper columns. Selection counts the positions you
+# hold now (open or pending sale), exactly as the automated run does.
 if not signals_df.empty and {"stop_dist", "eff_mult"}.issubset(signals_df.columns):
     from src import signals as _signals
+    _sectors = (dict(zip(shortlist["ticker"], shortlist["sector"]))
+                if "sector" in shortlist.columns else {})
     signals_df = _signals.resize_and_select(signals_df, load_table("prices"), CONFIG,
-                                             eff_capital, eff_maxpos, fx_rate)
+                                             eff_capital, eff_maxpos, fx_rate,
+                                             holdings=_ledger.holdings(CONFIG, _sectors))
 elif _wf_changed:
     st.sidebar.warning("Recalculate needs a fresh data pull first — open **📰 Macro & News → "
                        "⬇️ Pull fresh prices**, then adjust these.")
@@ -419,12 +423,20 @@ with tab_sig:
         _sig_extra = (signals_df[[c for c in ["ticker", "sector", "conviction", "beta", "price",
                                   "signal", "flags", "reason"] if c in signals_df.columns]]
                       if not signals_df.empty else pd.DataFrame(columns=["ticker"]))
-        new_buys = (_today_open.merge(_sig_extra, on="ticker", how="left")
+        # (the ledger now stores each position's sector too — take the signal's, avoid sector_x/_y)
+        new_buys = (_today_open.drop(columns=["sector"], errors="ignore")
+                    .merge(_sig_extra, on="ticker", how="left")
                     if not _today_open.empty else _today_open)
         st.markdown(f"**🟢 BUY these — new positions recommended today ({run_date}):**")
+        _full = (signals_df[(signals_df["signal"] == "BUY")
+                            & signals_df["select_note"].astype(str).str.startswith("portfolio full")]
+                 if "select_note" in signals_df.columns else signals_df.iloc[0:0])
         if new_buys.empty:
             st.info("No new BUYs recommended today. (Names you already hold appear under "
-                    "**📌 your open positions** on the Track record tab, not here.)")
+                    "**📌 your open positions** on the Track record tab, not here.)"
+                    + (f" {len(_full)} BUY signal(s) — {', '.join(_full['ticker'].head(6))} — were passed "
+                       f"over because all {eff_maxpos} slots are taken by positions you already hold."
+                       if not _full.empty else ""))
         else:
             new_buys = new_buys.copy()
             new_buys["buy_up_to"] = (
@@ -447,9 +459,9 @@ with tab_sig:
             st.caption("**Buy at** = the signal price · **Buy up to** = the most it's worth paying "
                        "today · **Price** = latest market price · **Buyable?** = ✅ still in range, or "
                        "⚠️ it's run past the entry / no longer a fresh BUY, so skip it or wait for a "
-                       f"pullback. *Note: these are today's fresh picks — the {CONFIG.max_positions}-position / "
-                       "risk cap is applied per run, so adding them on top of names you already hold can "
-                       "take you above it. Mind your total open count.*")
+                       f"pullback. New picks only fill **free** slots: the {CONFIG.max_positions}-position, "
+                       f"{CONFIG.max_per_sector}-per-sector and total-risk caps count the positions you "
+                       "already hold.")
 
         # SELL these — holdings the exit rules flagged today; they close at the next session's price.
         _pending = _ledger.pending_sells_view(load_table("prices"), CONFIG)
@@ -986,10 +998,11 @@ with tab_track:
                        "re-simulation under today's rules.")
 
     st.markdown("---")
-    st.markdown(f"### 🧪 Backtest — how the rules did over ~{CONFIG.backtest_years}")
-    st.caption("Uses the **upgraded rules** — trailing-stop + trend-break exits (gap-aware), entries "
-               "filtered for conviction, volume, relative strength and a rising market — with "
-               "**realistic vol-scaled costs** and an **out-of-sample** check below.")
+    st.markdown(f"### 🧪 Backtest — would these rules have beaten the index? (~{CONFIG.backtest_years})")
+    st.caption(f"Replays the **live rules as one £{CONFIG.capital_gbp:,.0f} account** — the same screen, "
+               "signals, regime gate, sizing, position / sector / risk caps and exits, filled the way the "
+               "track record fills them — on the S&P 500 **as it was at the time** (not today's winners), "
+               "and compares it with simply holding the S&P 500, or cash.")
     # Detect a hosted deployment: Streamlit Community Cloud checks the repo out under /mount/src;
     # (legacy Heroku set DYNO). The heavy multi-year backtest download is disabled there.
     on_cloud = os.path.isdir("/mount/src") or bool(os.environ.get("DYNO"))
@@ -1013,154 +1026,157 @@ with tab_track:
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Backtest failed: {e}")
 
-    if bt_summary_df.empty or int(bt_summary_df.iloc[0].get("trades", 0) or 0) == 0:
+    _bt_ok = (not bt_summary_df.empty and "cagr_pct" in bt_summary_df.columns
+              and int(bt_summary_df.iloc[0].get("trades", 0) or 0) > 0)
+    if not _bt_ok:
         with bcols[0]:
+            _why = ("The stored backtest is from an older version of the engine — re-run it. "
+                    if not bt_summary_df.empty else "")
             if on_cloud:
-                st.info("Backtesting runs locally, not on the hosted app (it's too heavy for the "
-                        "server). Run `python -m src.backtest` and the results ship in the snapshot.")
+                st.info(_why + "Backtesting runs locally, not on the hosted app (it's too heavy for "
+                        "the server). Run `python -m src.backtest` and the results ship in the snapshot.")
             else:
-                st.info(f"No backtest yet — click **Run backtest**. The first run downloads "
-                        f"~{CONFIG.backtest_years} of prices, so give it a few minutes.")
+                st.info(_why + f"Click **Run backtest**. The first run downloads ~{CONFIG.backtest_years} "
+                        "of prices and the S&P 500's membership history, so give it a few minutes.")
     else:
         s = bt_summary_df.iloc[0]
         _gp, _ga, _ = freshness(s.get("generated"))
-        if _gp:
-            st.caption(f"🕒 Backtest generated **{_gp}**" + (f" ({_ga})" if _ga else "")
-                       + f"  ·  {s.get('years', '?')} of history")
-        c = st.columns(5)
-        c[0].metric("Trades", int(s["trades"]))
-        c[1].metric("Win rate", f"{s['win_rate']}%")
-        c[2].metric("Avg trade", f"{s['expectancy_r']:+.2f}R",
-                    help="The edge per trade. Positive over many trades = the rules add value.")
-        c[3].metric("Profit factor", s.get("profit_factor"),
-                    help="Total winnings ÷ total losses. Above 1 = profitable; above 1.5 = strong.")
-        c[4].metric("Worst drop", f"{s['max_drawdown_pct']}%",
-                    help="Largest peak-to-trough fall of the strategy — the pain you'd have sat through.")
+        st.caption(f"🕒 Backtest generated **{_gp}**" + (f" ({_ga})" if _ga else "")
+                   + f"  ·  {s['start_date']} → {s['end_date']}  ·  {int(s['universe_members'])} "
+                   f"S&P 500 members over the period ({int(s['former_members_used'])} that later left the index)")
+        _cap = float(s["start_capital_gbp"])
+        st.markdown(f"**What £{_cap:,.0f} became, {s['start_date'][:7]} → {s['end_date'][:7]}:**")
+        c = st.columns(3)
+        c[0].metric("These rules", f"£{float(s['end_value_gbp']):,.0f}",
+                    help=f"{float(s['cagr_pct']):+.1f}% a year. The account replays every rule the app "
+                         "applies today, including the position, sector and risk caps.")
+        c[1].metric("S&P 500 (buy & hold)", f"£{float(s['spy_end_value_gbp']):,.0f}",
+                    help=f"{float(s['spy_cagr_pct']):+.1f}% a year — buy SPY once and do nothing.")
+        c[2].metric("Cash (T-bills)", f"£{float(s['cash_end_value_gbp']):,.0f}",
+                    help=f"{float(s['cash_cagr_pct']):+.1f}% a year.")
         c2 = st.columns(4)
-        c2[0].metric("Avg win", f"{s['avg_win_r']:+.1f}R")
-        c2[1].metric("Avg loss", f"{s['avg_loss_r']:+.1f}R")
-        c2[2].metric("Avg hold", f"{s['avg_hold_days']} days")
-        c2[3].metric("Timed out", f"{s.get('timeout_pct')}%",
-                     help="Share of trades that neither hit target nor stop and were closed on time.")
-        if s.get("exp_r_downtrend") is None:
-            st.caption(f"Average edge {s.get('exp_r_uptrend')}R/trade. The market-regime filter "
-                       "means it only trades when the S&P is rising, so there are no down-market trades.")
+        c2[0].metric("Return / yr", f"{float(s['cagr_pct']):+.1f}%",
+                     help=f"S&P 500: {float(s['spy_cagr_pct']):+.1f}% · cash: {float(s['cash_cagr_pct']):+.1f}%")
+        c2[1].metric("Worst drop", f"{float(s['max_drawdown_pct']):.0f}%",
+                     help=f"Largest peak-to-trough fall of the account (S&P 500: "
+                          f"{float(s['spy_max_drawdown_pct']):.0f}%) — the pain you'd have sat through.")
+        c2[2].metric("Avg invested", f"{float(s['avg_invested_pct']):.0f}%",
+                     help=f"The rest sat in cash. On average {float(s['avg_positions']):.1f} positions "
+                          f"were held (never more than {int(s['max_positions_held'])}).")
+        c2[3].metric("Trading costs", f"{float(s['costs_pct_per_year']):.1f}%/yr",
+                     help="Modelled spread + slippage + commission, as a share of the account each year.")
+        _cagr, _spy, _cash = float(s["cagr_pct"]), float(s["spy_cagr_pct"]), float(s["cash_cagr_pct"])
+        if _cagr <= _cash:
+            _v = (f"**earned no more than cash** ({_cagr:+.1f}% a year vs {_cash:+.1f}% for T-bills) while "
+                  f"risking drops of up to {float(s['max_drawdown_pct']):.0f}%")
+        elif _cagr < _spy:
+            _v = (f"**made money, but less than simply holding the S&P 500** ({_cagr:+.1f}% a year vs "
+                  f"{_spy:+.1f}%)")
         else:
-            st.caption(f"Average edge in up-markets: {s.get('exp_r_uptrend')}R/trade · "
-                       f"in down-markets: {s.get('exp_r_downtrend')}R/trade.")
+            _v = (f"**beat the S&P 500** ({_cagr:+.1f}% a year vs {_spy:+.1f}%) — check the worst drop and "
+                  "the caveats below before trusting it")
+        (st.success if _cagr > _spy else st.warning)(
+            f"**Verdict.** Over {s['start_date'][:4]}–{s['end_date'][:4]}, following every call these rules make {_v}.")
+        if not bt_equity_df.empty:
+            _eq = bt_equity_df.copy()
+            _eq["date"] = pd.to_datetime(_eq["date"])
+            _eq = _eq.set_index("date").rename(columns={
+                "strategy_gbp": "These rules", "spy_gbp": "S&P 500", "cash_gbp": "Cash (T-bills)"})
+            _eq = _eq[["These rules", "S&P 500", "Cash (T-bills)"]]
+            _colors = ["#e4572e", "#4c78a8", "#9aa5b1"]     # same colour per series on both charts
+            st.markdown(f"**Growth of £{_cap:,.0f}**")
+            st.line_chart(_eq, height=300, color=_colors)
+            _dd = pd.DataFrame({k: (_eq[k] / _eq[k].cummax() - 1) * 100 for k in ["These rules", "S&P 500"]})
+            st.markdown("**Drawdown** — how far below its own peak each one sat (%)")
+            st.line_chart(_dd, height=200, color=_colors[:2])
 
-        # Plain-English interpretation of THIS backtest's numbers
-        risk_gbp = CONFIG.capital_gbp * CONFIG.risk_per_trade
-        per_trade = s["expectancy_r"] * risk_gbp
-        win_gbp = s["avg_win_r"] * risk_gbp
-        loss_gbp = s["avg_loss_r"] * risk_gbp
-        wins_in_10 = round(s["win_rate"] / 10)
-        pf = s.get("profit_factor")
-        pf_word = ("above break-even but modest" if pf and pf < 1.3
-                   else "solid" if pf and pf < 1.7 else "strong" if pf else "")
-        pf_line = (f"- **Profit factor {pf}** → for every £1 lost, about **£{pf:.2f} was won** "
-                   f"({pf_word}).\n" if pf else "")
-        verdict = ("a small but positive edge" if s["expectancy_r"] > 0
-                   else "no edge (it lost money over the period)")
-        st.info(
-            f"**In plain terms.** About **{wins_in_10} in 10** trades made money — close to a "
-            f"coin-flip. What makes it work is that **winners were bigger than losers**: a typical "
-            f"win was **{s['avg_win_r']:+.1f}R (≈ £{win_gbp:,.0f})** while a typical loss was only "
-            f"**{s['avg_loss_r']:+.1f}R (≈ £{loss_gbp:,.0f})**. Net, every trade added on average "
-            f"**{s['expectancy_r']:+.2f}R ≈ £{per_trade:,.0f}** for every £{risk_gbp:,.0f} risked — "
-            f"{verdict}.\n\n"
-            f"{pf_line}"
-            f"- The edge is **small per trade**, so it only shows up over **many** trades "
-            f"(here, {int(s['trades']):,}). Don't judge it over a handful.\n"
-            f"- **{s['timeout_pct']}%** of trades neither hit target nor stop — they were closed on "
-            f"the {CONFIG.backtest_max_hold_days}-day time limit (the 'don't hold too long' rule).\n"
-            f"- The **worst losing stretch was {s['max_drawdown_pct']}%** — expect bumpy periods even "
-            f"when the strategy works. High beta is a rough ride, which is exactly why the sizing, "
-            f"sector cap and circuit-breaker matter.\n"
-            + ("- The **market-regime filter** kept it out of falling markets entirely (no "
-               "down-market trades), which is how it should behave.\n"
-               if s.get("exp_r_downtrend") is None else
-               f"- Edge in falling markets was {s.get('exp_r_downtrend')}R/trade.\n"))
-        if not bt_trades_df.empty and "equity" in bt_trades_df.columns:
-            eq = bt_trades_df.sort_values("entry_date")[["entry_date", "equity"]].copy()
-            eq["entry_date"] = pd.to_datetime(eq["entry_date"])
-            eq = eq.set_index("entry_date")
-            eq["drawdown_%"] = (eq["equity"] / eq["equity"].cummax() - 1.0) * 100
-            st.markdown("**Drawdown over the backtest** — how far below its own peak the strategy sat")
-            st.area_chart(eq["drawdown_%"], height=220)
-            st.caption("This is the honest picture of the ride: each dip is a losing stretch, in % of "
-                       "the (compounding) account. The headline numbers to trust are the win rate, "
-                       "average edge (R) and profit factor above.")
-        # Robustness (6): Monte-Carlo range + parameter sensitivity
-        if s.get("mc_exp_p50") is not None:
-            st.markdown("#### 🎲 How robust is this? (not just one lucky run)")
+        # Edge vs chance: the entry signal against random entries on the same shortlist / exits
+        if pd.notna(s.get("random_expectancy_r")):
+            st.markdown("#### 🎲 Does the entry signal beat chance?")
+            _sig, _rnd = float(s["signal_expectancy_r"]), float(s["random_expectancy_r"])
+            r0 = st.columns(3)
+            r0[0].metric("Signal — average trade", f"{_sig:+.3f}R",
+                         help=f"Every qualifying signal ({int(s['signal_trades']):,} trades), one at a time per "
+                              "stock, with the live exits and costs — no account limits.")
+            r0[1].metric("Random entries — average trade", f"{_rnd:+.3f}R",
+                         help=f"Range {float(s['random_exp_p5']):+.3f} to {float(s['random_exp_p95']):+.3f}R "
+                              f"across {int(s['random_runs'])} runs of ~{int(s['random_trades']):,} trades.")
+            r0[2].metric("Edge over random", f"{_sig - _rnd:+.3f}R per trade")
+            st.caption("Same shortlisted stocks, same days on offer, same exits and costs — only the entry "
+                       "*timing* is random. If the signal's average trade isn't clearly above the random "
+                       "range, the entry rules aren't adding much on their own. (1R = the amount risked.)")
+
+        st.markdown("#### The account's trades")
+        c = st.columns(5)
+        c[0].metric("Trades", f"{int(s['trades']):,}")
+        c[1].metric("Win rate", f"{float(s['win_rate']):.0f}%")
+        c[2].metric("Avg trade", f"{float(s['expectancy_r']):+.3f}R",
+                    help="The edge per trade the account actually took, after costs. 1R = the amount risked.")
+        c[3].metric("Profit factor", s.get("profit_factor"),
+                    help="Total winnings ÷ total losses. Above 1 = profitable.")
+        c[4].metric("Avg hold", f"{float(s['avg_hold_days']):.0f} days")
+        st.caption(f"How trades ended: **{s.get('trend_exit_pct')}%** trend break (closed below the "
+                   f"{CONFIG.trend_exit_sma}-day average), **{s.get('stop_exit_pct')}%** trailing stop, "
+                   f"**{s.get('timeout_pct')}%** the {CONFIG.max_hold_days}-day time limit. Average win "
+                   f"{float(s['avg_win_r']):+.2f}R, average loss {float(s['avg_loss_r']):+.2f}R.")
+
+        if s.get("mc_exp_p50") is not None and pd.notna(s.get("mc_exp_p50")):
+            st.markdown("**How robust is this?** (block bootstrap — trades are resampled a month at a time, "
+                        "because trades on the same days move together)")
             r1 = st.columns(3)
-            r1[0].metric("Edge — likely range",
-                         f"{s.get('mc_exp_p5')} to {s.get('mc_exp_p95')}R",
-                         help="5th–95th percentile of the average trade across "
-                              f"{CONFIG.backtest_mc_runs} resamples of the trade history.")
-            r1[1].metric("Chance the edge is real", f"{s.get('mc_prob_positive')}%",
-                         help="Share of resamples where the average trade stayed positive. "
-                              "Higher = less likely the result was luck.")
+            r1[0].metric("Avg trade — likely range", f"{s.get('mc_exp_p5')} to {s.get('mc_exp_p95')}R",
+                         help=f"5th–95th percentile across {CONFIG.backtest_mc_runs} resamples.")
+            r1[1].metric("Resamples with a positive edge", f"{s.get('mc_prob_positive')}%")
             r1[2].metric("Bad-case drawdown", f"{s.get('mc_maxdd_p95')}%",
-                         help="A rough 1-in-20 worst losing streak — plan to stomach at least this.")
-            st.caption("If the low end of the edge range is still comfortably positive and the "
-                       "'chance it's real' is high, the result is trustworthy rather than a fluke.")
-        if not bt_sens_df.empty:
-            st.markdown("**Does it depend on one exact setting?** (stop-width sensitivity)")
+                         help="A rough 1-in-20 worst fall from resampled months of account returns.")
+        if not bt_sens_df.empty and "cagr_pct" in bt_sens_df.columns:
+            st.markdown("**Does it hinge on one exact setting?** (initial stop width)")
             st.dataframe(bt_sens_df, width="stretch", hide_index=True, column_config={
                 "stop_atr_mult": st.column_config.NumberColumn("Stop width (×ATR)", format="%.1f"),
+                "cagr_pct": st.column_config.NumberColumn("Return / yr", format="%.1f%%"),
+                "max_drawdown_pct": st.column_config.NumberColumn("Worst drop", format="%.0f%%"),
                 "trades": st.column_config.NumberColumn("Trades"),
                 "expectancy_r": st.column_config.NumberColumn("Avg trade (R)", format="%.3f"),
-                "win_rate": st.column_config.NumberColumn("Win rate", format="%.1f%%"),
-                "profit_factor": st.column_config.NumberColumn("Profit factor", format="%.2f"),
             })
-            st.caption("The edge should stay positive across nearby stop widths — if it only works "
-                       "at one exact number, that's a red flag for over-fitting.")
-
-        # D2 — out-of-sample stability (time split) + per-year edge
         _oe, _or = s.get("oos_earlier_exp_r"), s.get("oos_recent_exp_r")
-        if _oe is not None and _or is not None:
-            st.markdown("**Does the edge hold out-of-sample?** (a time split — not a re-shuffle of the same trades)")
+        if pd.notna(_oe) and pd.notna(_or):
             oc = st.columns(2)
-            oc[0].metric("Earlier ~70% of history", f"{float(_oe):+.3f}R/trade")
-            oc[1].metric(f"Recent ~30% (from {str(s.get('oos_split_date'))[:7]})", f"{float(_or):+.3f}R/trade",
-                         help=f"{int(s.get('oos_recent_trades') or 0)} trades in the slice the earlier period never informed.")
-            st.caption("If the recent, unseen slice is still positive and close to the earlier one, the "
-                       "edge is stable rather than a relic of one era.")
-        if not bt_year_df.empty:
-            st.markdown("**Edge by year** — steady, or lumpy?")
-            _by = bt_year_df.copy()
-            _per_r = CONFIG.risk_per_trade * CONFIG.capital_gbp  # £ per 1R (≈ £750)
-            _by["pnl_gbp"] = (_by["expectancy_r"].astype(float) * _by["trades"].astype(float)
-                              * _per_r).round(0)
-            st.dataframe(_by, width="stretch", hide_index=True, column_config={
+            oc[0].metric("Avg trade — earlier ~70% of history", f"{float(_oe):+.3f}R")
+            oc[1].metric(f"Avg trade — recent ~30% (from {str(s.get('oos_split_date'))[:7]})",
+                         f"{float(_or):+.3f}R",
+                         help=f"{int(s.get('oos_recent_trades') or 0)} trades the earlier period never informed.")
+        if not bt_year_df.empty and "strategy_pct" in bt_year_df.columns:
+            st.markdown("**Year by year** — the account vs the S&P 500 and cash")
+            st.dataframe(bt_year_df, width="stretch", hide_index=True, column_config={
                 "year": st.column_config.TextColumn("Year"),
+                "strategy_pct": st.column_config.NumberColumn("These rules", format="%+.1f%%"),
+                "spy_pct": st.column_config.NumberColumn("S&P 500", format="%+.1f%%"),
+                "cash_pct": st.column_config.NumberColumn("Cash", format="%+.1f%%"),
                 "trades": st.column_config.NumberColumn("Trades"),
-                "expectancy_r": st.column_config.NumberColumn("Avg trade (R)", format="%.3f"),
-                "win_rate": st.column_config.NumberColumn("Win rate", format="%.1f%%"),
-                "pnl_gbp": st.column_config.NumberColumn("Profit / loss (£)", format="£%d",
-                    help=f"Total R for the year × £{_per_r:,.0f} risked per trade. This is the RULES' "
-                         "aggregate — the backtest takes every qualifying setup across the universe "
-                         "(far more than your 8-position account holds at once), so read it as the "
-                         "edge's shape by year, not a single account's yearly return."),
+                "expectancy_r": st.column_config.NumberColumn("Avg trade (R)", format="%+.3f"),
+                "win_rate": st.column_config.NumberColumn("Win rate", format="%.0f%%"),
             })
-            st.caption("High-beta momentum makes money in trending years and bleeds in choppy/bear ones "
-                       "(e.g. 2018, 2022) — expected, and exactly why the regime gate and sizing exist. "
-                       "The £ column assumes ~£{:,.0f} risk per trade across *all* the year's setups "
-                       "(more than 8 slots can hold), so it sizes the edge, not a live account.".format(_per_r))
+            st.caption("The first and last years are partial.")
 
         with st.expander("⚠️ Read this before trusting the backtest"):
             st.markdown(
-                "- **Survivorship bias:** uses today's S&P 500 — failed companies are excluded, "
-                "so real-world results would be somewhat worse.\n"
-                "- **Technicals only:** the news + macro layers aren't replayed (no historical news feed) — "
-                "the *live scorecard* above does include them.\n"
-                f"- **Realistic, vol-scaled costs:** a base {CONFIG.backtest_cost_pct*100:.1f}% plus an "
-                "extra slice proportional to each name's daily swing (jumpier stocks cost more to "
-                "trade) — the same cost the live scorecard applies. Stops are **gap-aware** (filled at "
-                "the open if price gaps below), so overnight-gap losses are captured.\n"
-                "- **Past ≠ future.** This shows whether the rules *had* an edge, not a promise they will.")
+                f"- **Point-in-time universe:** a stock only counts while it was actually in the S&P 500 "
+                f"(rebuilt month by month from Wikipedia's history), and {int(s['former_members_used'])} "
+                "companies that later left the index are included. But "
+                f"{int(s['former_members_missing'])} former members have no free price history "
+                "(bankruptcies, most takeovers), so some survivorship bias remains — real results would "
+                "likely be a bit worse.\n"
+                "- **Not replayed:** news / sentiment, post-earnings drift, the earnings blackout, macro-event "
+                "half-sizing and the options / short-interest flags — there's no free point-in-time history "
+                "for them. The live scorecard above does include them.\n"
+                "- **Fills as the track record makes them:** buys at the signal day's close; sells flagged when "
+                "an exit triggers and filled at the next session's close. Buying at the next morning's open "
+                "instead would usually cost a little more.\n"
+                f"- **Costs:** a base {CONFIG.backtest_cost_pct*100:.1f}% round trip plus a slice proportional "
+                "to each name's daily swing — the same model the live scorecard uses. Currency conversion "
+                "and taxes aren't modelled.\n"
+                "- **Past ≠ future.** This shows how the rules *would have* done, not a promise.")
+
 
 # =================== HOW IT WORKS TAB ===================
 with tab_how:
@@ -1188,7 +1204,7 @@ up-trending` (beta & momentum standardised first). The top **{c.shortlist_size}*
 |---|---|
 | 🔴 **SELL** | price below its 50-day average (trend broken), or weak (RSI < 35) and not trending |
 | 🟡 **HOLD** | up-trend but overbought (RSI ≥ **{c.rsi_overbought:.0f}**) or cooling (RSI < **{c.rsi_min_buy:.0f}**), or no clear setup |
-| 🟢 **BUY** | up-trend **and** positive momentum **and** RSI **{c.rsi_min_buy:.0f}–{c.rsi_overbought:.0f}** — **plus** three gates: beats the S&P (relative strength), above-average volume, and **confidence ≥ {c.min_conviction}%**. (The same rules the backtest validated.) |
+| 🟢 **BUY** | up-trend **and** positive momentum **and** RSI **{c.rsi_min_buy:.0f}–{c.rsi_overbought:.0f}** — **plus** three gates: beats the S&P (relative strength), above-average volume, and **confidence ≥ {c.min_conviction}%**. (The backtest replays exactly these rules.) |
 
 **6 · Size (BUYs only)** — risk **{c.risk_per_trade*100:.1f}% of £{c.capital_gbp:,.0f} = £{risk_gbp:,.0f}**
 per trade (converted to USD at the live rate). Stop = entry − **{c.atr_stop_mult:.0f}×ATR**;
@@ -1200,9 +1216,10 @@ exits on a close below the **{c.trend_exit_sma}-day** average — winners run, l
 **track record scores trades this exact way**; each *All signals* row carries a **Track record** tag
 (🟡 *Holding*, or 🟢/🔴 the last closed result in R) — a *past* call that can differ from today's.
 
-**7 · Portfolio** — fill up to **{c.max_positions}** BUYs by rank, capped at **{c.max_per_sector} per
-sector**, skipping names ≥ **{c.max_position_correlation:.0%}** correlated with one already held, and
-keeping total risk under **{c.max_portfolio_heat*100:.0f}%** of capital. Sizes are **edge-weighted** —
+**7 · Portfolio** — fill the free slots, up to **{c.max_positions}** positions in total, with BUYs by
+rank, capped at **{c.max_per_sector} per sector**, skipping names ≥ **{c.max_position_correlation:.0%}**
+correlated with one already held, and keeping total risk under **{c.max_portfolio_heat*100:.0f}%** of
+capital — every cap counts the positions you already hold, not just the day's picks. Sizes are **edge-weighted** —
 higher confidence → closer to full size, down to a **{c.edge_size_floor:.0%}** floor.
 """
     )
@@ -1300,9 +1317,10 @@ for is a real macro/econ calendar (FMP/Finnhub premium); more Alpha Vantage news
 - **Steadier beta** — shrunk **{int(c.beta_shrink*100)}%** toward the market average so a noisy estimate can't mislead.
 - **Data checks** — stale or gappy tickers are dropped before they can signal.
 - **Circuit-breaker** — warns if today's closed trades lose more than **{c.daily_loss_limit_pct*100:.0f}% of capital**.
-- **Backtest** (📈 tab) — replays ~{c.backtest_years} of history (incl. bear markets) with the same
-  trailing/trend exits and filtered entries, plus a Monte-Carlo range and stop-width sweep so a good
-  result isn't luck. Everything in **R** (multiples of risk).
+- **Backtest** (📈 tab) — replays these exact rules as one £{c.capital_gbp:,.0f} account over
+  ~{c.backtest_years} (incl. bear markets) on the S&P 500 *as it was at the time*, against simply
+  holding the S&P 500 or cash — plus a random-entry baseline, a block-bootstrap range and a
+  stop-width sweep, so a good-looking result has to beat both the index and luck.
 
 *Honest note: this manages risk and measures the edge — it doesn't guarantee profit. Short-term moves
 are close to random; the discipline (stops, sizing, diversification) is the protection.*

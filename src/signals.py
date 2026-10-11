@@ -102,14 +102,17 @@ def technical_buy_candidates(prices, shortlist, cfg):
     return out
 
 
-def size_position(entry, atr, cfg, fx_rate):
-    """Return sizing dict in USD + GBP, or None if unsizable."""
+def size_position(entry, atr, cfg, fx_rate, capital_gbp=None, max_positions=None):
+    """Return sizing dict in USD + GBP, or None if unsizable. `capital_gbp` / `max_positions`
+    default to the configured account; the backtest passes its running equity instead."""
     if not atr or atr <= 0 or entry <= 0:
         return None
+    capital_gbp = cfg.capital_gbp if capital_gbp is None else capital_gbp
+    max_positions = cfg.max_positions if max_positions is None else max_positions
     stop_dist = cfg.atr_stop_mult * atr
-    capital_usd = cfg.capital_gbp * fx_rate
-    risk_usd = cfg.capital_gbp * cfg.risk_per_trade * fx_rate      # £750 in USD
-    per_pos_cap = capital_usd / cfg.max_positions                  # equal-weight slot
+    capital_usd = capital_gbp * fx_rate
+    risk_usd = capital_gbp * cfg.risk_per_trade * fx_rate          # £750 in USD
+    per_pos_cap = capital_usd / max_positions                      # equal-weight slot
     shares_by_risk = risk_usd / stop_dist
     shares_by_cap = per_pos_cap / entry
     shares = int(math.floor(min(shares_by_risk, shares_by_cap)))
@@ -142,6 +145,33 @@ def _conviction(ind, nws, cfg):
         (nws is None) or nws.get("label") != "negative",         # news not against it
     ]
     return int(round(sum(bool(c) for c in checks) / len(checks) * 100))
+
+
+def entry_gate_failures(ind, spy_mom3, conviction, cfg):
+    """Entry-quality gates a technical BUY must also clear: minimum confidence, relative strength
+    (beating the S&P over 3 months) and above-average volume. Returns the plain-English failures
+    (empty = passes). Shared by live signals and the backtest, so both apply identical gates."""
+    fails = []
+    if conviction < cfg.min_conviction:
+        fails.append(f"confidence {conviction}% below the {cfg.min_conviction}% bar")
+    if cfg.require_rel_strength and not ((ind.get("mom_3m") or 0) > spy_mom3):
+        fails.append("not beating the S&P (weak relative strength)")
+    _v, _v20 = ind.get("vol"), ind.get("vol20")
+    if cfg.require_volume_confirm and not (
+            _v is not None and _v20 is not None and not np.isnan(_v)
+            and not np.isnan(_v20) and _v > _v20):
+        fails.append("volume below its 20-day average")
+    return fails
+
+
+def edge_multiplier(conviction, cfg):
+    """C3: edge-weighted sizing — scale size by confidence (a fractional-Kelly proxy), so marginal
+    setups get less capital: the floor fraction at the minimum confidence, full size at 100%."""
+    if not cfg.edge_weighted_sizing:
+        return 1.0
+    span = max(1, 100 - cfg.min_conviction)
+    frac = min(1.0, max(0.0, (conviction - cfg.min_conviction) / span))
+    return cfg.edge_size_floor + (1 - cfg.edge_size_floor) * frac
 
 
 def _apply_pead(conviction, pead, cfg):
@@ -187,11 +217,13 @@ def _return_corr(prices, tickers, window):
 
 
 def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=None,
-                  earnings_map=None, news_map=None, extras_map=None, pead_map=None):
+                  earnings_map=None, news_map=None, extras_map=None, pead_map=None,
+                  holdings=None):
     """shortlist: DataFrame with [rank, ticker, beta]. Applies the macro layers:
     Layer A (regime gate), Layer B (earnings + macro event risk), Layer C (news),
     Layer E (post-earnings drift / PEAD), plus the B2/B3 overlay (options IV + short
-    interest) as informational flags."""
+    interest) as informational flags. `holdings` = positions already held (ledger.holdings) —
+    they count toward the position, sector, heat and correlation caps when picking."""
     macro_events = macro_events or []
     earnings_map = earnings_map or {}
     news_map = news_map or {}
@@ -222,23 +254,11 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
         conviction = _apply_pead(_conviction(ind, nws, cfg), pead, cfg)
         flags = []
 
-        # Entry-quality gates — mirror the backtested rules so a live BUY == what was validated:
-        # relative strength (beating the S&P), above-average volume, and a minimum confidence.
+        # Entry-quality gates (shared with the backtest): relative strength (beating the S&P),
+        # above-average volume, and a minimum confidence.
         if signal == "BUY":
-            rs_ok = (not cfg.require_rel_strength) or ((ind.get("mom_3m") or 0) > spy_mom3)
-            _v, _v20 = ind.get("vol"), ind.get("vol20")
-            vol_ok = (not cfg.require_volume_confirm) or (
-                _v is not None and _v20 is not None and not np.isnan(_v)
-                and not np.isnan(_v20) and _v > _v20)
-            conv_ok = conviction >= cfg.min_conviction
-            if not (rs_ok and vol_ok and conv_ok):
-                fails = []
-                if not conv_ok:
-                    fails.append(f"confidence {conviction}% below the {cfg.min_conviction}% bar")
-                if not rs_ok:
-                    fails.append("not beating the S&P (weak relative strength)")
-                if not vol_ok:
-                    fails.append("volume below its 20-day average")
+            fails = entry_gate_failures(ind, spy_mom3, conviction, cfg)
+            if fails:
                 signal = "HOLD"
                 reason = "Setup too weak to buy — " + "; ".join(fails)
 
@@ -296,12 +316,9 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
                 if imminent:
                     reason += " (major data imminent — size reduced)"
 
-        # C3: edge-weighted sizing — scale size by confidence (a fractional-Kelly proxy), so
-        # marginal setups get less capital. Never exceeds the full per-trade risk.
-        if signal == "BUY" and cfg.edge_weighted_sizing:
-            span = max(1, 100 - cfg.min_conviction)
-            frac = min(1.0, max(0.0, (conviction - cfg.min_conviction) / span))
-            eff_mult *= cfg.edge_size_floor + (1 - cfg.edge_size_floor) * frac
+        # C3: edge-weighted sizing — marginal setups get less capital (never above full risk).
+        if signal == "BUY":
+            eff_mult *= edge_multiplier(conviction, cfg)
 
         sizing = size_position(ind["entry"], ind["atr"], cfg, fx_rate) if signal == "BUY" else None
         if sizing and eff_mult < 1.0:
@@ -352,49 +369,97 @@ def build_signals(prices, shortlist, cfg, fx_rate, regime=None, macro_events=Non
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-    return _select_portfolio(df, prices, cfg, cfg.max_positions, cfg.capital_gbp)
+    return _select_portfolio(df, prices, cfg, cfg.max_positions, cfg.capital_gbp, holdings)
 
 
-def _select_portfolio(df, prices, cfg, max_positions, capital_gbp):
-    """Fill up to `max_positions` slots from the BUY signals by rank, subject to the sector cap,
-    the portfolio-heat ceiling (scaled by `capital_gbp`), and the correlation cap. Sets `selected`.
+def choose_positions(cands, held, cfg, max_positions, heat_cap, corr=None):
+    """Fill the free slots from `cands` on top of what's already `held`. Both are lists of dicts
+    {ticker, sector, risk} (risk in the same currency as `heat_cap`); `cands` are best-first.
+
+    Every cap counts the holdings — the slot cap, the per-sector cap, the total-risk (heat) ceiling
+    and the correlation cap — so following each day's picks can never stack the book past the
+    limits. `corr(a, b)` returns the return correlation of two tickers, or None if unknown.
+    Shared by live selection and the backtest. Returns (picked tickers, {ticker: why skipped})."""
+    picked, skipped = [], {}
+    book = list(held)
+    heat = sum(h["risk"] for h in held)
+    for c in cands:
+        t = c["ticker"]
+        if len(book) >= max_positions:
+            skipped[t] = (f"portfolio full ({len(held)} held"
+                          + (f" + {len(picked)} new" if picked else "") + f" of {max_positions} slots)")
+            continue
+        if sum(1 for b in book if b["sector"] == c["sector"]) >= cfg.max_per_sector:
+            skipped[t] = f"sector full ({cfg.max_per_sector} in {c['sector']})"
+            continue  # keep the portfolio diversified
+        if c["risk"] <= 0:
+            skipped[t] = "too small to size at this capital"
+            continue
+        if heat_cap and heat + c["risk"] > heat_cap:
+            skipped[t] = "would breach the total-risk (heat) ceiling"
+            continue  # a smaller pick further down may still fit
+        if corr is not None:
+            near = [(b["ticker"], corr(t, b["ticker"])) for b in book]
+            near = [(bt, v) for bt, v in near if v is not None and abs(v) >= cfg.max_position_correlation]
+            if near:
+                skipped[t] = f"moves in lockstep with {near[0][0]} (correlation {near[0][1]:.2f})"
+                continue  # same bet in disguise — skip for real diversification
+        picked.append(t)
+        book.append(c)
+        heat += c["risk"]
+    return picked, skipped
+
+
+def _held_book(holdings):
+    """ledger.holdings() frame -> the [{ticker, sector, risk}] list choose_positions counts."""
+    if holdings is None or len(holdings) == 0:
+        return []
+    out = []
+    for _, h in holdings.iterrows():
+        _rg = pd.to_numeric(h.get("risk_gbp"), errors="coerce")
+        out.append({"ticker": h["ticker"],
+                    "sector": h.get("sector") if isinstance(h.get("sector"), str) and h.get("sector") else "Unknown",
+                    "risk": float(_rg) if pd.notna(_rg) else 0.0})
+    return out
+
+
+def _select_portfolio(df, prices, cfg, max_positions, capital_gbp, holdings=None):
+    """Fill the free slots from the BUY signals by rank, on top of the positions already held,
+    subject to the sector cap, the portfolio-heat ceiling (scaled by `capital_gbp`) and the
+    correlation cap. Sets `selected`, plus `select_note` saying why a BUY wasn't picked.
     Split out from build_signals so the dashboard what-if can re-select for a different slot
     count / capital without re-running the whole engine."""
     df = df.copy()
     df["selected"] = False
-    sector_count = {}
-    chosen = 0
-    heat_gbp = 0.0
-    heat_cap_gbp = cfg.max_portfolio_heat * capital_gbp  # total £-at-risk ceiling
-    # C2: return-correlation matrix over the BUY candidates, to avoid stacking one macro bet.
-    corr = _return_corr(prices, df[df["signal"] == "BUY"]["ticker"].tolist(), cfg.corr_window)
-    picked = []
+    df["select_note"] = ""
+    held = _held_book(holdings)
+    held_tickers = {h["ticker"] for h in held}
+    cands = []
     for i, r in df[df["signal"] == "BUY"].sort_values("rank").iterrows():
-        if chosen >= max_positions:
-            break
-        sec = r.get("sector", "Unknown")
-        if sector_count.get(sec, 0) >= cfg.max_per_sector:
-            continue  # sector full — skip to keep the portfolio diversified
+        if r["ticker"] in held_tickers:
+            df.loc[i, "select_note"] = "already held"
+            continue
         _rg = r.get("risk_gbp")
-        r_gbp = float(_rg) if pd.notna(_rg) else 0.0
-        if r_gbp <= 0:
-            continue  # unsized (too small at this capital/slot) — can't take it
-        if heat_cap_gbp and heat_gbp + r_gbp > heat_cap_gbp:
-            continue  # would breach the portfolio-heat ceiling — skip (a smaller pick may still fit)
-        t = r["ticker"]
-        if corr is not None and picked and t in corr.index:  # correlation cap
-            near = [abs(corr.loc[t, s]) for s in picked if s in corr.columns]
-            if near and max(near) >= cfg.max_position_correlation:
-                continue  # moves in lockstep with a pick already held — skip for real diversification
-        df.loc[i, "selected"] = True
-        sector_count[sec] = sector_count.get(sec, 0) + 1
-        heat_gbp += r_gbp
-        picked.append(t)
-        chosen += 1
+        cands.append({"ticker": r["ticker"], "sector": r.get("sector", "Unknown"),
+                      "risk": float(_rg) if pd.notna(_rg) else 0.0})
+    # C2: return correlations over the candidates AND the holdings, to avoid stacking one macro bet.
+    cm = _return_corr(prices, [c["ticker"] for c in cands] + sorted(held_tickers), cfg.corr_window)
+
+    def corr(a, b):
+        if cm is None or a not in cm.index or b not in cm.columns or pd.isna(cm.loc[a, b]):
+            return None
+        return float(cm.loc[a, b])
+
+    picked, skipped = choose_positions(cands, held, cfg, max_positions,
+                                       cfg.max_portfolio_heat * capital_gbp, corr)
+    sel = df["ticker"].isin(picked) & (df["signal"] == "BUY")
+    df.loc[sel, "selected"] = True
+    for t, why in skipped.items():
+        df.loc[(df["ticker"] == t) & (df["signal"] == "BUY"), "select_note"] = why
     return df
 
 
-def resize_and_select(sig, prices, cfg, capital_gbp, max_positions, fx_rate):
+def resize_and_select(sig, prices, cfg, capital_gbp, max_positions, fx_rate, holdings=None):
     """What-if recompute: re-size every BUY and re-pick the portfolio for a different trading
     capital / slot count, using the already-computed signals. It touches ONLY sizing (shares, £
     risk, position value) and selection — the BUY/HOLD/SELL call, conviction, stop and target are
@@ -429,4 +494,4 @@ def resize_and_select(sig, prices, cfg, capital_gbp, max_positions, fx_rate):
         df.loc[i, "risk_usd"] = round(shares * sd, 0)
         df.loc[i, "risk_gbp"] = round(shares * sd / fx_rate, 0)
         df.loc[i, "binding"] = "risk" if shares_by_risk <= shares_by_cap else "capital"
-    return _select_portfolio(df, prices, cfg, max_positions, capital_gbp)
+    return _select_portfolio(df, prices, cfg, max_positions, capital_gbp, holdings)

@@ -29,12 +29,17 @@ def build_digest(kind, sig, regime_row, events, fx_rate, cfg):
 
     if sig is not None and not sig.empty:
         sel = sig[sig["selected"].astype(bool)] if "selected" in sig.columns else sig.iloc[0:0]
-        lines.append(f"TODAY'S PORTFOLIO ({len(sel)} positions):")
+        lines.append(f"TODAY'S NEW BUYS ({len(sel)} positions):")
         for _, r in sel.iterrows():
             note = f"  | {r.get('flags')}" if r.get("flags") else ""
             lines.append(f"  BUY {r['ticker']:6s} entry ${r.get('entry')}  stop ${r.get('stop')}  "
                          f"target ${r.get('target')}  x{int(r.get('shares') or 0)}  "
                          f"risk £{int(r.get('risk_gbp') or 0)}{note}")
+        if "select_note" in sig.columns:
+            skipped = sig[(sig["signal"] == "BUY") & ~sig["selected"].astype(bool)
+                          & (sig["select_note"].astype(str) != "")]
+            for _, r in skipped.head(5).iterrows():
+                lines.append(f"  (skipped {r['ticker']} — {r['select_note']})")
         sells = sig[sig["signal"] == "SELL"].head(10)
         if not sells.empty:
             lines.append("")

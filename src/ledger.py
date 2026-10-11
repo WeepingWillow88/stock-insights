@@ -15,7 +15,7 @@ from . import db
 
 COLUMNS = ["ticker", "record_date", "entry", "stop", "target", "shares", "risk_gbp",
            "status", "sell_signal_date", "sell_reason",
-           "exit_date", "exit_price", "r_multiple", "outcome"]
+           "exit_date", "exit_price", "r_multiple", "outcome", "sector"]
 # status lifecycle: "open" -> "sell_pending" (exit flagged; shown as SELL today) -> "closed"
 # (filled at the next session's price the following run, i.e. next day).
 # Columns that must stay numeric — pandas 3.0 reads text-ish SQLite columns as a strict `str`
@@ -73,6 +73,22 @@ def open_tickers(cfg):
     return set(led[led["status"].isin(["open", "sell_pending"])]["ticker"])
 
 
+def holdings(cfg, sectors=None):
+    """Positions currently held — open, or flagged to sell but not yet filled (a pending sale still
+    occupies its slot and its risk until it closes). These count toward the position, sector,
+    heat and correlation caps when the day's BUYs are picked (signals.choose_positions).
+    `sectors` (ticker -> sector) fills in rows logged before the ledger stored a sector."""
+    led = _load(cfg)
+    cols = ["ticker", "sector", "risk_gbp", "status", "record_date"]
+    if led.empty:
+        return pd.DataFrame(columns=cols)
+    h = led[led["status"].isin(["open", "sell_pending"])].copy()
+    stored = h["sector"].where(h["sector"].notna() & (h["sector"].astype(str).str.strip() != ""))
+    mapped = h["ticker"].map(sectors or {})
+    h["sector"] = stored.fillna(mapped).fillna("Unknown")
+    return h[cols].reset_index(drop=True)
+
+
 def record_recommendations(sig, cfg, today=None):
     today = today or dt.date.today().isoformat()
     if sig is None or sig.empty or "selected" not in sig.columns:
@@ -93,12 +109,40 @@ def record_recommendations(sig, cfg, today=None):
             "entry": r.get("entry"), "stop": r.get("stop"), "target": r.get("target"),
             "shares": r.get("shares"), "risk_gbp": r.get("risk_gbp"),
             "status": "open", "exit_date": None, "exit_price": None,
-            "r_multiple": None, "outcome": None,
+            "r_multiple": None, "outcome": None, "sector": r.get("sector"),
         })
     if rows:
         led = pd.concat([led, pd.DataFrame(rows)], ignore_index=True)
         db.write_df(led, "ledger", cfg.db_path)
     return len(rows)
+
+
+def exit_signal(stop, atr0, hh, close, low, trend_avg, held, cfg):
+    """One session of the exit model, shared by the live ledger AND the backtest. Call it for each
+    session after the entry day, in order: `hh` = the highest close since entry so far (start at
+    the entry price), `held` = sessions since entry including this one. The trailing stop sits
+    trail_atr_mult x the entry ATR below the highest close, never below the initial `stop`.
+    Returns (reason, updated hh) — reason is None while the position is still healthy."""
+    hh = max(hh, close)
+    trail = max(stop, hh - cfg.trail_atr_mult * atr0)
+    if low <= trail:
+        return "hit the trailing stop", hh
+    if pd.notna(trend_avg) and close < trend_avg:
+        return f"closed below its {cfg.trend_exit_sma}-day average (trend break)", hh
+    if held >= cfg.max_hold_days:
+        return f"held the {cfg.max_hold_days}-day limit", hh
+    return None, hh
+
+
+def trade_r(entry, stop, exit_price, cfg):
+    """Net R multiple of a closed long: the move minus modelled round-trip costs (a base slice plus
+    one proportional to the entry ATR — jumpier names cost more), over the initial stop distance.
+    Shared by the ledger and the backtest so both score a trade identically."""
+    stop_dist = entry - stop
+    atr0 = stop_dist / cfg.atr_stop_mult if cfg.atr_stop_mult else stop_dist
+    trade_cost = cfg.backtest_cost_pct + cfg.backtest_spread_atr_coef * (atr0 / entry)
+    net = (exit_price / entry - 1) - trade_cost
+    return net / (stop_dist / entry) if stop_dist > 0 else 0.0
 
 
 def _first_exit(row, prices, cfg):
@@ -116,15 +160,10 @@ def _first_exit(row, prices, cfg):
     hh, held = entry, 0
     for _, b in bars.iterrows():
         held += 1
-        close, low = float(b["close"]), float(b["low"])
-        hh = max(hh, close)
-        trail = max(stop, hh - cfg.trail_atr_mult * atr0)
-        if low <= trail:
-            return b["date"], "hit the trailing stop"
-        if pd.notna(b["sma_trend"]) and close < float(b["sma_trend"]):
-            return b["date"], f"closed below its {cfg.trend_exit_sma}-day average (trend break)"
-        if held >= cfg.ledger_max_hold_days:
-            return b["date"], f"held the {cfg.ledger_max_hold_days}-day limit"
+        reason, hh = exit_signal(stop, atr0, hh, float(b["close"]), float(b["low"]),
+                                 b["sma_trend"], held, cfg)
+        if reason:
+            return b["date"], reason
     return None, None
 
 
@@ -154,13 +193,8 @@ def update_open_positions(prices, cfg):
         if after.empty:
             continue  # no new bar yet — stays 'SELL today' until the next run
         bar = after.iloc[0]
-        entry, stop = float(row["entry"]), float(row["stop"])
         exit_price = float(bar["close"])
-        atr0 = (entry - stop) / cfg.atr_stop_mult if cfg.atr_stop_mult else (entry - stop)
-        stop_dist = entry - stop
-        trade_cost = cfg.backtest_cost_pct + cfg.backtest_spread_atr_coef * (atr0 / entry)
-        net = (exit_price / entry - 1) - trade_cost
-        r = net / (stop_dist / entry) if stop_dist > 0 else 0.0
+        r = trade_r(float(row["entry"]), float(row["stop"]), exit_price, cfg)
         led.loc[idx, ["status", "exit_date", "exit_price", "r_multiple", "outcome"]] = \
             ["closed", bar["date"], round(exit_price, 2), round(r, 2), "win" if r > 0 else "loss"]
         changed += 1
@@ -207,7 +241,7 @@ def open_positions_view(prices, cfg):
             action, reason = "SELL", "at/through the trailing stop"
         elif pd.notna(sma) and current < float(sma):
             action, reason = "SELL", f"closed below its {cfg.trend_exit_sma}-day average (trend break)"
-        elif held >= cfg.ledger_max_hold_days:
+        elif held >= cfg.max_hold_days:
             action, reason = "SELL", f"held {held} days (time limit)"
         stop_dist = entry - stop
         unreal_r = (current - entry) / stop_dist if stop_dist > 0 else 0.0

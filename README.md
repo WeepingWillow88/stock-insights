@@ -3,15 +3,16 @@
 A decision-support app that screens the liquid US market for **high-beta** stocks in an uptrend,
 turns them into **BUY / HOLD / SELL** calls with **position sizing**, overlays a **market-regime
 gate**, **macro-event** and **earnings** risk, **sentiment**, and **post-earnings drift**, keeps a
-**track-record ledger**, and validates the rules with a **10-year backtest** (Monte-Carlo +
-stop-width sweep). See `TRADING_STRATEGY_BRIEF.md` for a plain-English walkthrough of the strategy.
+**track-record ledger**, and replays the rules in a **10-year point-in-time backtest** — one
+account on the S&P 500 as it was at the time, against holding the S&P 500 or cash, with a
+random-entry baseline. See `TRADING_STRATEGY_BRIEF.md` for a plain-English walkthrough of the strategy.
 
 > Decision-support only. Not financial advice. You place every trade yourself.
 
 ## Your settings (in `src/config.py`)
 - Capital: **£50,000** (override with the `CAPITAL_GBP` env var / repo variable)
 - Risk per trade: **1.5%** (~£750 max loss)
-- Max concurrent positions: **8** (portfolio heat cap ~12%; applied per run — see the strategy brief)
+- Max concurrent positions: **8**, counting everything you already hold (portfolio heat cap ~12%)
 - Benchmark: **SPY**
 
 ## Setup
@@ -36,7 +37,7 @@ streamlit run app.py
 ## What each piece does
 | File | Role |
 |------|------|
-| `src/universe.py` | Builds the ticker universe (S&P 500 via Wikipedia; fallback list if offline) |
+| `src/universe.py` | Builds the ticker universe (S&P 500 via Wikipedia; fallback list if offline), plus the index's month-by-month membership history for the backtest |
 | `src/data.py`     | Downloads daily OHLCV + FX via yfinance (free, no API key) |
 | `src/metrics.py`  | Beta vs SPY, 1m/3m momentum, trend (SMA50/200), ATR%, avg $ volume |
 | `src/screen.py`   | Filters for tradability + min beta, ranks by beta+momentum+trend |
@@ -48,7 +49,7 @@ streamlit run app.py
 | `src/pead.py`     | Post-earnings drift (PEAD) — momentum-aligned earnings tilt |
 | `src/marketdata.py` | Options IV + short interest + analyst-revision overlays (best-effort) |
 | `src/ledger.py`   | Track-record ledger: logs recommendations, resolves exits (trail/trend/time) |
-| `src/backtest.py` | 10-year replay with the same exits + Monte-Carlo range and stop-width sweep |
+| `src/backtest.py` | Replays the live rules as one account on point-in-time S&P 500 membership vs SPY + cash; random-entry baseline, block bootstrap, stop-width sweep |
 | `src/notify.py` · `src/shock.py` | Email/file digests; hourly news-shock check |
 | `src/pipeline.py` | Orchestrates a full refresh and writes results to SQLite |
 | `app.py`          | Streamlit dashboard: signals & sizing, macro & news, track record, screener, how-it-works |
@@ -84,9 +85,10 @@ immediately (the app copies it into place on first run).
   once-daily **Claude insight** for colour. Fallback when the crowd is quiet: FinBERT → keywords.
   (**FinBERT is off in the cloud** — PyTorch is too heavy for the free tier — so the cloud fallback
   is keywords.) Claude no longer drives the BUY/HOLD/SELL signal.
-- The **🔄 Refresh** button works on the cloud (macro + news + signals). **Run backtest** will
-  re-download history and may be slow/limited on the free tier — run it locally and it ships in
-  the seed snapshot.
+- The **🔄 Refresh** button works on the cloud (macro + news + signals). **Run backtest** is
+  disabled on the hosted app (it downloads ~10 years of prices for ~650 tickers plus the S&P 500's
+  membership history) — run `python -m src.backtest` locally, then `python make_seed.py`, and the
+  results ship in the seed snapshot.
 - Cloud storage is ephemeral: refreshes update the running app but reset on redeploy. The baseline
   advances via the scheduled GitHub Action (below), which rebuilds and pushes `data/seed.db`.
 
@@ -132,8 +134,8 @@ rebuilding the seed (`python make_seed.py`), and pushing again.
 ## Status / roadmap
 Delivered: signal engine + position sizing (GBP→USD), macro-regime gate, macro-event & earnings
 risk, sentiment (StockTwits + Alpha Vantage + once-daily Claude insight), post-earnings drift,
-track-record ledger, 10-year backtest, and a twice-daily hands-off data refresh.
+track-record ledger, a point-in-time 10-year backtest of the live rules, position / sector / risk
+caps enforced across live holdings, and a twice-daily hands-off data refresh.
 
-- **Next** — graded (not binary) sentiment contribution to conviction; enforce the position cap
-  across live holdings, not just per run.
+- **Next** — graded (not binary) sentiment contribution to conviction.
 - **Later** — widen universe to Russell 1000–3000; optional IBKR position sync.
