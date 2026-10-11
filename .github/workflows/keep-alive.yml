@@ -1,0 +1,71 @@
+name: Keep Streamlit app awake
+
+# Streamlit Community Cloud puts an app to sleep after ~12 hours with no VIEWER traffic. The
+# refresh-data workflow's pushes redeploy the code but don't count as visits, so the app still
+# falls asleep overnight and every weekend.
+#
+# A plain `curl` doesn't count either: the real app runs over a websocket inside the /~/+/ iframe.
+# So this opens the page in headless Chromium (a real visit) and, if the "Zzzz" sleep page is
+# showing, clicks "Yes, get this app back up!" and waits for the app to come back.
+#
+# Every 6 hours keeps us well inside the 12-hour window even if GitHub delivers a cron late.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_URL: https://stock-insights-uq7jzremi79p9ib38tkc7h.streamlit.app/
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visit the app (and wake it if asleep)
+        run: |
+          python - <<'PY'
+          import os, sys
+          from playwright.sync_api import sync_playwright
+
+          URL = os.environ["APP_URL"]
+          WAKE = "get this app back up"
+
+          def find_wake_button(page):
+              # The sleep page can render on the outer page or inside the app iframe — check both.
+              for frame in page.frames:
+                  btn = frame.get_by_role("button", name=WAKE)
+                  if btn.count():
+                      return btn.first
+              return None
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
+              page.wait_for_timeout(15_000)          # let the iframe + websocket connect
+
+              btn = find_wake_button(page)
+              if btn:
+                  print("App was asleep — clicking wake button.")
+                  btn.click()
+                  page.wait_for_timeout(5_000)
+                  if find_wake_button(page):
+                      print("::error::Wake button still showing after click.")
+                      sys.exit(1)
+                  page.wait_for_timeout(90_000)      # stay connected while it boots
+                  print("Wake requested; app should be back up.")
+              else:
+                  page.wait_for_timeout(20_000)      # stay connected so the visit registers
+                  print("App was awake — visit registered.")
+              browser.close()
+          PY
