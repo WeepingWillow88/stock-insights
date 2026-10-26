@@ -159,16 +159,21 @@ def intraday_stale(iso):
     return ""
 
 
-def _age_days(iso):
-    """Calendar days since `iso`, or None if it can't be parsed. Used to tell a single dropped run
-    apart from an automation outage — the two need very different advice.
-
-    Counts whole dates rather than 24h blocks so this agrees with the ledger's own "flagged N days
-    ago" wording; a time delta would truncate (17.9 days -> 17) and read as an off-by-one next to it."""
+def _weekdays_missed(iso):
+    """Whole weekdays (US Eastern dates) strictly between the last refresh and today — trading
+    days the schedule skipped entirely. Used to tell a late or dropped run apart from an automation
+    outage, which need very different advice. A Friday-evening refresh seen on Monday has missed
+    none: the schedule doesn't run at weekends, so a weekend is not an outage. (Today itself is
+    `intraday_stale`'s job.) None if `iso` can't be parsed."""
     try:
-        return (dt.date.today() - dt.datetime.fromisoformat(str(iso)).date()).days
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+        last = dt.datetime.fromisoformat(str(iso)).replace(tzinfo=dt.timezone.utc).astimezone(et).date()
     except Exception:  # noqa: BLE001 - unparseable timestamp: caller falls back to the coarse flags
         return None
+    today = dt.datetime.now(et).date()
+    return sum(1 for k in range(1, (today - last).days)
+               if (last + dt.timedelta(days=k)).weekday() < 5)
 
 
 st.title("📈 High-Beta Stock Insights")
@@ -239,7 +244,7 @@ fx_rate = float(signals_df["fx_rate"].iloc[0]) if (not signals_df.empty and "fx_
 _last_updated = meta_df.iloc[0].get("last_updated") if not meta_df.empty else run_date
 _market_through = meta_df.iloc[0].get("market_through") if not meta_df.empty else None
 _run_kind = meta_df.iloc[0].get("run_kind") if not meta_df.empty else None
-upd_pretty, upd_ago, upd_stale = freshness(_last_updated)
+upd_pretty, upd_ago, _ = freshness(_last_updated)
 
 _bits = [f"🕒 **Last updated:** {upd_pretty}" + (f" ({upd_ago})" if upd_ago else "")]
 if _market_through and not pd.isna(_market_through):
@@ -248,26 +253,26 @@ if _run_kind and not pd.isna(_run_kind):
     _bits.append(f"via {_run_kind}")
 _fresh_line = "  ·  ".join(_bits)
 _intraday_reason = intraday_stale(_last_updated)
-_age = _age_days(_last_updated)
-# Beyond a long weekend, "a refresh was dropped" is the wrong diagnosis: the schedule itself has
-# stopped, and pulling prices by hand patches the symptom while the signals, news and ledger stay
-# frozen. Say so, and point at the thing that actually needs fixing.
-if _age is not None and _age >= 3:
+_missed = _weekdays_missed(_last_updated)
+# Two or more whole weekdays with no refresh at all is an outage, not a late run: the schedule
+# itself has stopped, and pulling prices by hand only patches it for one session while the shared
+# signals, news and ledger stay frozen. Say so, and point at the thing that actually needs fixing.
+# (Weekends don't count — the schedule doesn't run then, so Monday morning is not an outage.)
+if _missed is not None and _missed >= 2:
     st.error(
-        # Deliberately no day count here — `_fresh_line` already carries the age, and a second
-        # figure derived a different way (calendar dates vs elapsed time) reads as a contradiction.
+        # Deliberately no day count here — `_fresh_line` already carries the age.
         _fresh_line + "  —  🛑 **The automated refresh has stopped.** This is an "
-        "outage, not a late run: signals, news and the track-record ledger are all frozen at the "
-        "date above, and any position flagged for exit is stuck mid-trade. **⬇️ Pull fresh prices** "
-        "updates prices only — it does not re-run the pipeline or advance the ledger. Fix the "
-        "schedule: check the repo's **Actions** tab for failed or missing runs and its **Issues** "
-        "tab for an auto-filed *“Scheduled data refresh failed”* report.")
+        "outage, not a late run: the shared signals, news and track-record ledger are frozen at "
+        "the date above, and any position flagged for exit is stuck mid-trade. **⬇️ Pull fresh "
+        "prices** re-runs everything for your session only — a preview, not saved for anyone "
+        "else. Fix the schedule: check the repo's **Actions** tab for failed or missing runs and "
+        "its **Issues** tab for an auto-filed *“Scheduled data refresh failed”* report.")
 elif _intraday_reason:
     st.error(_fresh_line + f"  —  ⚠️ **{_intraday_reason}.** A scheduled refresh was likely dropped "
              "or delayed. Open the 📰 Macro & News tab and hit **⬇️ Pull fresh prices** to update now.")
-elif upd_stale:
-    st.warning(_fresh_line + "  —  this looks **stale**; open the 📰 Macro & News tab and hit "
-               "**⬇️ Pull fresh prices** (or re-run the pipeline) to advance the market-data date.")
+elif _missed == 1:
+    st.warning(_fresh_line + "  —  a whole trading day passed with **no scheduled refresh**; open the "
+               "📰 Macro & News tab and hit **⬇️ Pull fresh prices** to update now.")
 else:
     st.success(_fresh_line)
 
@@ -681,7 +686,8 @@ with tab_news:
             with st.spinner("Downloading fresh prices for the full universe and rebuilding — "
                             "this can take a few minutes…"):
                 try:
-                    pipeline.run_pipeline(CONFIG, send_digest=False, reuse_news=True)
+                    pipeline.run_pipeline(CONFIG, send_digest=False, reuse_news=True,
+                                          run_kind="in-app refresh")
                     load_table.clear()
                     st.success("Fresh prices pulled — market data advanced to the latest trading day.")
                     st.rerun()

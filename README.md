@@ -99,11 +99,35 @@ immediately (the app copies it into place on first run).
 and pushes it, which triggers a Streamlit redeploy so the live app stays fresh. It needs
 **Actions → workflow permissions = read/write** and the repo secrets above.
 
-> **Timing note:** GitHub's built-in cron is best-effort and has delivered runs hours late. For
-> precise timing, the workflow accepts a `kind` input (`pre-open`/`pre-close`) via
-> `workflow_dispatch`, so an **external scheduler** (e.g. cron-job.org) can POST to the dispatch API
-> at exact ET times. The built-in crons remain a fallback; an idempotency guard prevents
-> double-refreshes.
+> **Timing note:** GitHub's built-in cron is best-effort. For this repo it has delivered the
+> 08:45 ET pre-open run 4–7 hours late (after the open) and dropped many slots, so the workflow
+> offers it 24 half-hourly weekday slots and its gate turns all but the first per slot into a
+> ~20 s no-op. That's a fallback, not a guarantee — for exact times, add the external trigger below.
+
+### Reliable timing: trigger the refresh from cron-job.org (recommended)
+
+A `workflow_dispatch` runs as soon as it's requested, so a free external scheduler that calls
+GitHub's API at fixed Eastern times makes the refresh punctual (a run takes ~7 min, ≤ 16 min). The
+built-in crons stay as the fallback: if a dispatch has already refreshed the slot, their late
+deliveries no-op.
+
+1. **GitHub token** — github.com → Settings → Developer settings → Fine-grained tokens → Generate.
+   Repository access: *Only select repositories* → `stock-insights`. Permissions → **Actions: Read
+   and write** (nothing else). Pick the longest expiry and diarise renewing it.
+2. **cron-job.org** (free account) → *Create cronjob*, twice:
+
+   | | Pre-open | Pre-close |
+   |---|---|---|
+   | URL | `https://api.github.com/repos/WeepingWillow88/stock-insights/actions/workflows/refresh-data.yml/dispatches` | same |
+   | Schedule | Mon–Fri **08:30**, time zone **America/New_York** | Mon–Fri **15:20**, America/New_York |
+   | Method | `POST` | `POST` |
+   | Headers | `Authorization: Bearer <token>` · `Accept: application/vnd.github+json` · `Content-Type: application/json` | same |
+   | Body | `{"ref":"main","inputs":{"kind":"pre-open"}}` | `{"ref":"main","inputs":{"kind":"pre-close"}}` |
+
+   Turn on *notify on failure*: GitHub answers `204 No Content` on success, and a `401` means
+   the token expired. Use *Test run* once to see a run appear in the repo's **Actions** tab.
+
+The America/New_York time zone handles daylight saving, so the times never need adjusting.
 
 ## Deploy to Heroku (legacy — Streamlit Cloud is the live host)
 
