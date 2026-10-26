@@ -5,25 +5,24 @@ name: Refresh market data
 # repo triggers a Streamlit Community Cloud redeploy, so the live app picks up fresh prices with
 # no manual step.
 #
-# Schedule is in UTC (GitHub cron ignores DST). US market is 09:30–16:00 ET. We want two runs:
+# Schedule is in UTC (GitHub cron ignores DST). US market is 09:30–16:00 ET. We want two refreshes
+# a weekday:
 #   • pre-open   — morning, before the 09:30 ET open
-#   • pre-close  — ~15 min before the 16:00 ET close
-# ET is UTC-4 (summer/EDT) or UTC-5 (winter/EST), so each intent has one cron per season.
+#   • pre-close  — shortly before the 16:00 ET close (or, failing that, after it)
 #
-# GitHub's scheduled trigger is BEST-EFFORT: under load it delays runs by many minutes or drops
-# them entirely, with no retry — so a single pre-close cron is unreliable (see the dropped
-# 2026-08-26 afternoon run). We therefore fire SEVERAL staggered pre-close crons; the "gate" step
-# below passes only the ones that land in the pre-/post-close window (the wrong season's crons land
-# outside it and are skipped), and an idempotency check makes every attempt after the first a
-# no-op — so we get redundancy against dropped/late deliveries without double refreshes.
+# GitHub's scheduled trigger is BEST-EFFORT, and for this repo it runs HOURS late and drops many
+# slots: over 2026-10-01..10-21 the 12:45 UTC "pre-open" cron landed at 16:56–19:31 UTC every day —
+# after the 13:30 UTC open — and the 19:20–20:50 UTC pre-close crons landed 1.5–6 h late, ~3 of 7
+# slots a day. Exact times can't be had from GitHub's scheduler, so instead we offer it MANY slots,
+# each well ahead of the window it's aiming at, and let the "gate" step below decide: the first run
+# to land after midnight ET does the morning refresh, the first after 15:00 ET does the afternoon
+# one, and the idempotency check turns every other delivery into a ~20-second no-op.
 on:
   schedule:
-    # --- pre-open (morning; the gate accepts any pre-noon ET run, so one is plenty) ---
-    - cron: "45 12 * * 1-5"    # ~08:45 ET (EDT) / 07:45 ET (EST) — before the open
-    # --- pre-close, EDT/summer: 15:20 / 15:35 / 15:50 ET (staggered redundancy) ---
-    - cron: "20,35,50 19 * * 1-5"
-    # --- pre-close, EST/winter: 15:20 / 15:35 / 15:50 ET (staggered redundancy) ---
-    - cron: "20,35,50 20 * * 1-5"
+    # --- morning band, 06:15–10:45 UTC (02:15–06:45 ET summer): even 4–7 h late, lands pre-open ---
+    - cron: "15,45 6-10 * * 1-5"
+    # --- afternoon band, 14:15–20:45 UTC: late deliveries land in / after the pre-close window ---
+    - cron: "15,45 14-20 * * 1-5"
   # GitHub's own cron is unreliable (it delivered this repo's runs hours late / overnight and
   # missed slots). The RELIABLE path is an EXTERNAL scheduler (e.g. cron-job.org) that POSTs to
   # this workflow's dispatch API at exact times with the `kind` input — a dispatch runs immediately,
