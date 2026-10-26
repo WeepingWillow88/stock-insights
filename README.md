@@ -100,9 +100,9 @@ and pushes it, which triggers a Streamlit redeploy so the live app stays fresh. 
 **Actions → workflow permissions = read/write** and the repo secrets above.
 
 > **Timing note:** GitHub's built-in cron is best-effort. For this repo it has delivered the
-> 08:45 ET pre-open run 4–7 hours late (after the open) and dropped many slots, so the workflow
-> offers it 24 half-hourly weekday slots and its gate turns all but the first per slot into a
-> ~20 s no-op. That's a fallback, not a guarantee — for exact times, add the external trigger below.
+> 08:45 ET pre-open run 3–7 hours late (after the open) and dropped many slots, so the workflow
+> offers it 72 quarter-hourly weekday slots (from 02:07 UTC, so even late ones land before the
+> open), and its gate skips weekends and turns all but the first per slot into a ~20 s no-op. That's a fallback, not a guarantee — for exact times, add the external trigger below.
 
 ### Reliable timing: trigger the refresh from cron-job.org (recommended)
 

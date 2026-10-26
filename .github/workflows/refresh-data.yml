@@ -19,10 +19,12 @@ name: Refresh market data
 # one, and the idempotency check turns every other delivery into a ~20-second no-op.
 on:
   schedule:
-    # --- morning band, 06:15–10:45 UTC (02:15–06:45 ET summer): even 4–7 h late, lands pre-open ---
-    - cron: "15,45 6-10 * * 1-5"
-    # --- afternoon band, 14:15–20:45 UTC: late deliveries land in / after the pre-close window ---
-    - cron: "15,45 14-20 * * 1-5"
+    # Every 15 min (off the busy top of the hour) in two bands. Last week's deliveries ran 3-5 h
+    # late, so the morning band starts at 02:07 UTC to land before the 13:30/14:30 UTC open.
+    # --- morning band, 02:07–11:52 UTC ---
+    - cron: "7,22,37,52 2-11 * * 1-5"
+    # --- afternoon band, 13:07–20:52 UTC: late deliveries land in / after the pre-close window ---
+    - cron: "7,22,37,52 13-20 * * 1-5"
   # GitHub's own cron is unreliable (it delivered this repo's runs hours late / overnight and
   # missed slots). The RELIABLE path is an EXTERNAL scheduler (e.g. cron-job.org) that POSTs to
   # this workflow's dispatch API at exact times with the `kind` input — a dispatch runs immediately,
@@ -84,7 +86,11 @@ jobs:
               # So: accept the trigger whenever it arrives inside a sane daily band, label it by
               # which half of the day it lands in, and let the idempotency check below (not the
               # clock) be the thing that prevents a double refresh.
-              if now.hour < 15:                      # the morning cron, however late it arrives
+              if now.weekday() >= 5:
+                  # Weekend in New York: nothing to refresh. (Monday's early-UTC slots are still
+                  # Sunday evening ET, and would otherwise burn a refresh + AI call on old data.)
+                  run = "no"
+              elif now.hour < 15:                    # the morning cron, however late it arrives
                   kind = "pre-open"
               elif now.hour < 23:
                   close = now.replace(hour=16, minute=0, second=0, microsecond=0)
