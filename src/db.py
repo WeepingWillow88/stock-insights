@@ -6,15 +6,16 @@ import sqlite3
 import pandas as pd
 
 
-def _market_through(path):
-    """Latest market date recorded in a DB's meta table, or None if unavailable."""
+def _freshness_key(path):
+    """(market_through, last_updated) from a DB's meta table, or None if unavailable. Compared as
+    a tuple: a later market date wins, and on the same date the later refresh wins."""
     if not os.path.exists(path):
         return None
     try:
         conn = sqlite3.connect(path)
         try:
-            row = conn.execute("SELECT market_through FROM meta LIMIT 1").fetchone()
-            return row[0] if row else None
+            row = conn.execute("SELECT market_through, last_updated FROM meta LIMIT 1").fetchone()
+            return (str(row[0]), str(row[1] or "")) if row and row[0] else None
         finally:
             conn.close()
     except Exception:  # noqa: BLE001
@@ -28,10 +29,13 @@ def bootstrap_working_db(db_path, seed_path="data/seed.db", refresh_if_newer=Fal
     - Always copies when the working DB is ABSENT — this is the key fix for CI / the daily
       GitHub Action, where only seed.db is checked out: without it the pipeline would start
       from an empty ledger every run and never accumulate closed trades.
-    - With refresh_if_newer=True, also re-copies when the seed covers a LATER market date than
-      the working copy (used by the Cloud app, whose working DB is ephemeral and can go stale
-      across redeploys). Compares market_through, not file mtime, so a richer local working DB
-      (e.g. one holding the backtest price cache) isn't clobbered when data is already current.
+    - With refresh_if_newer=True, also re-copies when the seed holds NEWER data than the working
+      copy (used by the Cloud app, whose container keeps its working DB between pushes): a later
+      market date, or the same date refreshed later. Comparing the date alone missed every
+      same-day refresh — the post-close run after a morning run, or a scheduled run after an
+      in-app 'Pull fresh prices' — leaving the app on the day's first refresh until the next day.
+      Uses the meta timestamps, not file mtime, so a richer local working DB (e.g. one holding the
+      backtest price cache) isn't clobbered when its data is already as fresh.
 
     Returns True if a copy happened.
     """
@@ -42,8 +46,8 @@ def bootstrap_working_db(db_path, seed_path="data/seed.db", refresh_if_newer=Fal
         shutil.copy(seed_path, db_path)
         return True
     if refresh_if_newer:
-        st, wt = _market_through(seed_path), _market_through(db_path)
-        if st and wt and str(st) > str(wt):
+        st, wt = _freshness_key(seed_path), _freshness_key(db_path)
+        if st and wt and st > wt:
             shutil.copy(seed_path, db_path)
             return True
     return False

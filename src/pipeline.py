@@ -15,7 +15,7 @@ from . import (data, db, events, ledger, marketdata, metrics, news, notify, pead
                screen, signals, universe)
 
 
-def run_pipeline(cfg=CONFIG, send_digest=True, reuse_news=False):
+def run_pipeline(cfg=CONFIG, send_digest=True, reuse_news=False, run_kind=None):
     """Full refresh: re-download prices for the whole universe, recompute metrics,
     screen, signals, macro and news, and write everything to the DB. This is what
     advances `market_through` to the latest trading day. Set send_digest=False to
@@ -107,7 +107,7 @@ def run_pipeline(cfg=CONFIG, send_digest=True, reuse_news=False):
     changed = ledger.update_open_positions(prices, cfg)
     print(f"      ledger: +{opened} new positions logged, {changed} exit(s) flagged/closed.")
 
-    run_kind = os.environ.get("RUN_KIND", "BOD")
+    run_kind = run_kind or os.environ.get("RUN_KIND", "BOD")   # shown in-app as 'via full pipeline (…)'
     if send_digest:
         body = notify.build_digest(run_kind, sig, reg_row, macro_events, fx_rate, cfg)
         notify.send_or_save(f"[{run_kind}] High-beta signals {run_date}", body, cfg)
